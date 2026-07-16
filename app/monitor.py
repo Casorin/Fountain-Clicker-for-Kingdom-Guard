@@ -69,6 +69,8 @@ class MonitorState:
     last_status: str = "Ожидание"
     candidate_value: int | None = None
     candidate_hits: int = 0
+    candidate_capture_id: str | None = None
+    candidate_at: datetime | None = None
     reset_candidate_hits: int = 0
     reset_candidate_value: int | None = None
     test_mode: bool = True
@@ -517,8 +519,7 @@ class PrizeMonitor:
         self.state.last_value = None
         self.state.raw_ocr_value = None
         self.state.trusted_value = None
-        self.state.candidate_value = None
-        self.state.candidate_hits = 0
+        self._clear_candidate()
         self.state.reset_candidate_hits = 0
         self.state.reset_candidate_value = None
         self.state.last_reset_at = None
@@ -1045,8 +1046,7 @@ class PrizeMonitor:
         return anchors.event_screen_ok and anchors.button_visible
 
     def _reset_progress_due_to_anchors(self, phase_to_waiting: bool = True) -> None:
-        self.state.candidate_value = None
-        self.state.candidate_hits = 0
+        self._clear_candidate()
         self.state.next_click_at = None
         self.state.checking_until = None
         self.state.burst_taps_done = 0
@@ -1073,37 +1073,94 @@ class PrizeMonitor:
                 self.state.last_status = "RESET_COOLDOWN завершён"
             self._save_persisted_state()
 
-    def _update_candidate(self, value: int) -> None:
+    def _clear_candidate(self) -> None:
+        self.state.candidate_value = None
+        self.state.candidate_hits = 0
+        self.state.candidate_capture_id = None
+        self.state.candidate_at = None
+
+    def _start_candidate(self, value: int, capture_id: str, now: datetime, status: str) -> None:
+        self.state.candidate_value = value
+        self.state.candidate_hits = 1
+        self.state.candidate_capture_id = capture_id
+        self.state.candidate_at = now
+        self.state.phase = MonitorPhase.CANDIDATE
+        self.state.last_status = status
+
+    def _update_candidate(
+        self,
+        value: int,
+        capture_id: str,
+        now: datetime,
+        anchors: AnchorStatus,
+    ) -> None:
+        if (
+            self.state.notification_veto
+            or self.state.ocr_status != OcrStatus.VISIBLE
+            or not self._anchors_allow_progress(anchors)
+        ):
+            self._clear_candidate()
+            if self.state.phase not in {MonitorPhase.RESET_COOLDOWN, MonitorPhase.RESET_TIME_UNKNOWN}:
+                self.state.phase = MonitorPhase.WAITING
+            self.state.last_status = "CANDIDATE blocked: trusted OCR safety gates are not valid"
+            return
+
         in_range = self.is_target_value(value)
         if not in_range:
-            self.state.candidate_value = None
-            self.state.candidate_hits = 0
+            self._clear_candidate()
             if self.state.phase not in {MonitorPhase.RESET_COOLDOWN, MonitorPhase.RESET_TIME_UNKNOWN}:
                 self.state.phase = MonitorPhase.WAITING
             self.state.last_status = f"Найдено значение: {value}"
             return
 
         if self.state.candidate_hits == 0:
-            self.state.candidate_value = value
-            self.state.candidate_hits = 1
-            self.state.phase = MonitorPhase.CANDIDATE
-            self.state.last_status = f"CANDIDATE: первое подтверждение {value}"
+            self._start_candidate(
+                value,
+                capture_id,
+                now,
+                f"CANDIDATE: первое подтверждение {value}",
+            )
             return
 
-        same_value = value == self.state.candidate_value
-        fallback_ok = self.config.allow_in_range_fallback and in_range
-        if same_value or fallback_ok:
+        if capture_id == self.state.candidate_capture_id:
+            self.state.last_status = "CANDIDATE: duplicate capture ignored"
+            return
+
+        previous = self.state.candidate_value
+        previous_at = self.state.candidate_at
+        if previous is None or previous_at is None:
+            self._start_candidate(value, capture_id, now, f"CANDIDATE: restarted at {value}")
+            return
+
+        growth = value - previous
+        if growth < 0:
+            self._clear_candidate()
+            self.state.phase = MonitorPhase.WAITING
+            self.state.last_status = f"CANDIDATE reset: backward value {previous}->{value}"
+            return
+
+        elapsed = max(0.10, (now - previous_at).total_seconds())
+        allowed_growth = int(
+            self.config.max_realistic_growth_per_second * elapsed
+            + self.config.realistic_growth_slack
+        )
+        if growth <= allowed_growth:
             self.state.candidate_hits += 1
+            self.state.candidate_value = value
+            self.state.candidate_capture_id = capture_id
+            self.state.candidate_at = now
             self.state.phase = MonitorPhase.CONFIRMED
             self.state.last_status = (
                 f"CONFIRMED: подтверждений {self.state.candidate_hits}/{self.config.stable_reads_required}"
             )
             return
 
-        self.state.candidate_value = value
-        self.state.candidate_hits = 1
-        self.state.phase = MonitorPhase.CANDIDATE
-        self.state.last_status = f"CANDIDATE: перезапуск подтверждения на {value}"
+        self._start_candidate(
+            value,
+            capture_id,
+            now,
+            f"CANDIDATE: incompatible growth {previous}->{value}, restarted",
+        )
 
     def _update_reset_detection(
         self,
@@ -1211,8 +1268,7 @@ class PrizeMonitor:
             self.state.reset_time_known = True
             self.state.manual_reset_block_real_taps = False
             self.state.phase = MonitorPhase.RESET_COOLDOWN
-            self.state.candidate_value = None
-            self.state.candidate_hits = 0
+            self._clear_candidate()
             self.state.reset_candidate_hits = 0
             self.state.reset_candidate_value = None
             self.state.burst_taps_done = 0
@@ -1368,7 +1424,7 @@ class PrizeMonitor:
 
     def _format_reset_confirmed_time(self) -> str:
         if not self.state.last_reset_confirmed_at:
-            return "�"
+            return "—"
         return self.state.last_reset_confirmed_at.strftime("%H:%M:%S")
 
     def poll_once(self) -> PollSnapshot:
@@ -1440,14 +1496,11 @@ class PrizeMonitor:
             MonitorPhase.CANDIDATE,
             MonitorPhase.CONFIRMED,
         }:
-            self.state.candidate_value = None
-            self.state.candidate_hits = 0
+            self._clear_candidate()
             self.state.phase = MonitorPhase.WAITING
 
         if self.state.phase == MonitorPhase.CHECKING_AFTER_BURST:
-            if self.state.phase == MonitorPhase.RESET_COOLDOWN:
-                pass
-            elif not anchors_ok:
+            if not anchors_ok:
                 self.state.last_status = "Якоря потеряны во время CHECKING_AFTER_BURST: возобновление кликов запрещено"
             elif self.state.checking_until and now < self.state.checking_until:
                 self.state.last_status = "CHECKING_AFTER_BURST: пауза перед OCR-проверкой"
@@ -1485,7 +1538,7 @@ class PrizeMonitor:
                 self._reset_progress_due_to_anchors()
             elif self.state.ocr_status == OcrStatus.VISIBLE and trusted_value is not None:
                 if self.state.phase != MonitorPhase.RESET_COOLDOWN:
-                    self._update_candidate(trusted_value)
+                    self._update_candidate(trusted_value, capture_id, now, anchors)
                     if self._can_start_clicking(trusted_value, anchors, now):
                         self.state.phase = MonitorPhase.ACTIVE_CLICKING
                         self.state.burst_taps_done = 0
@@ -1499,23 +1552,19 @@ class PrizeMonitor:
                             tap_events,
                         )
             elif self.state.ocr_status == OcrStatus.VISIBLE and recognition.value is not None:
-                self.state.candidate_value = None
-                self.state.candidate_hits = 0
+                self._clear_candidate()
                 self.state.last_status = f"OCR outlier rejected: {trust_reason}"
             elif self.state.ocr_status == OcrStatus.OBSCURED:
                 self.state.last_status = "Фонд временно закрыт уведомлением. Ожидание чистого кадра."
             elif self.state.ocr_status == OcrStatus.TIMEOUT:
-                self.state.candidate_value = None
-                self.state.candidate_hits = 0
+                self._clear_candidate()
                 self.state.last_status = "Windows OCR timeout"
             else:
-                self.state.candidate_value = None
-                self.state.candidate_hits = 0
+                self._clear_candidate()
                 self.state.last_status = "Ошибка распознавания"
 
         if self.state.ocr_status == OcrStatus.SKIPPED and self.state.phase in {MonitorPhase.WAITING, MonitorPhase.CANDIDATE, MonitorPhase.CONFIRMED}:
-            self.state.candidate_value = None
-            self.state.candidate_hits = 0
+            self._clear_candidate()
             self.state.last_status = f"Prefilter: {prefilter.status} ({prefilter.reason})"
 
         if (
