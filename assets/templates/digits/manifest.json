@@ -1,0 +1,629 @@
+{
+    "generated_at":  "2026-07-14T12:52:25",
+    "templates":  [
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_pre_prize_1_2.png",
+                          "sample_id":  "sample_pre_prize",
+                          "source_path":  "assets/templates/digits/production/sample_pre_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "3",
+                          "file":  "production/sample_pre_prize_2_3.png",
+                          "sample_id":  "sample_pre_prize",
+                          "source_path":  "assets/templates/digits/production/sample_pre_prize_2_3.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_pre_prize_3_0.png",
+                          "sample_id":  "sample_pre_prize",
+                          "source_path":  "assets/templates/digits/production/sample_pre_prize_3_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_pre_prize_4_5.png",
+                          "sample_id":  "sample_pre_prize",
+                          "source_path":  "assets/templates/digits/production/sample_pre_prize_4_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_pre_prize_5_0.png",
+                          "sample_id":  "sample_pre_prize",
+                          "source_path":  "assets/templates/digits/production/sample_pre_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_04_prize_1_2.png",
+                          "sample_id":  "sample_04_prize",
+                          "source_path":  "assets/templates/digits/production/sample_04_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_04_prize_2_5.png",
+                          "sample_id":  "sample_04_prize",
+                          "source_path":  "assets/templates/digits/production/sample_04_prize_2_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "9",
+                          "file":  "production/sample_04_prize_3_9.png",
+                          "sample_id":  "sample_04_prize",
+                          "source_path":  "assets/templates/digits/production/sample_04_prize_3_9.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_04_prize_4_0.png",
+                          "sample_id":  "sample_04_prize",
+                          "source_path":  "assets/templates/digits/production/sample_04_prize_4_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_04_prize_5_0.png",
+                          "sample_id":  "sample_04_prize",
+                          "source_path":  "assets/templates/digits/production/sample_04_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_06_prize_1_2.png",
+                          "sample_id":  "sample_06_prize",
+                          "source_path":  "assets/templates/digits/production/sample_06_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "6",
+                          "file":  "production/sample_06_prize_2_6.png",
+                          "sample_id":  "sample_06_prize",
+                          "source_path":  "assets/templates/digits/production/sample_06_prize_2_6.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "9",
+                          "file":  "production/sample_06_prize_3_9.png",
+                          "sample_id":  "sample_06_prize",
+                          "source_path":  "assets/templates/digits/production/sample_06_prize_3_9.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_06_prize_4_5.png",
+                          "sample_id":  "sample_06_prize",
+                          "source_path":  "assets/templates/digits/production/sample_06_prize_4_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_06_prize_5_0.png",
+                          "sample_id":  "sample_06_prize",
+                          "source_path":  "assets/templates/digits/production/sample_06_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_07_prize_1_2.png",
+                          "sample_id":  "sample_07_prize",
+                          "source_path":  "assets/templates/digits/production/sample_07_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "6",
+                          "file":  "production/sample_07_prize_2_6.png",
+                          "sample_id":  "sample_07_prize",
+                          "source_path":  "assets/templates/digits/production/sample_07_prize_2_6.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "9",
+                          "file":  "production/sample_07_prize_3_9.png",
+                          "sample_id":  "sample_07_prize",
+                          "source_path":  "assets/templates/digits/production/sample_07_prize_3_9.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_07_prize_4_5.png",
+                          "sample_id":  "sample_07_prize",
+                          "source_path":  "assets/templates/digits/production/sample_07_prize_4_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_07_prize_5_0.png",
+                          "sample_id":  "sample_07_prize",
+                          "source_path":  "assets/templates/digits/production/sample_07_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_08_prize_1_2.png",
+                          "sample_id":  "sample_08_prize",
+                          "source_path":  "assets/templates/digits/production/sample_08_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "7",
+                          "file":  "production/sample_08_prize_2_7.png",
+                          "sample_id":  "sample_08_prize",
+                          "source_path":  "assets/templates/digits/production/sample_08_prize_2_7.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_08_prize_3_2.png",
+                          "sample_id":  "sample_08_prize",
+                          "source_path":  "assets/templates/digits/production/sample_08_prize_3_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_08_prize_4_5.png",
+                          "sample_id":  "sample_08_prize",
+                          "source_path":  "assets/templates/digits/production/sample_08_prize_4_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_08_prize_5_0.png",
+                          "sample_id":  "sample_08_prize",
+                          "source_path":  "assets/templates/digits/production/sample_08_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_09_prize_1_2.png",
+                          "sample_id":  "sample_09_prize",
+                          "source_path":  "assets/templates/digits/production/sample_09_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "7",
+                          "file":  "production/sample_09_prize_2_7.png",
+                          "sample_id":  "sample_09_prize",
+                          "source_path":  "assets/templates/digits/production/sample_09_prize_2_7.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_09_prize_3_2.png",
+                          "sample_id":  "sample_09_prize",
+                          "source_path":  "assets/templates/digits/production/sample_09_prize_3_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_09_prize_4_5.png",
+                          "sample_id":  "sample_09_prize",
+                          "source_path":  "assets/templates/digits/production/sample_09_prize_4_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_09_prize_5_0.png",
+                          "sample_id":  "sample_09_prize",
+                          "source_path":  "assets/templates/digits/production/sample_09_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_10_prize_1_2.png",
+                          "sample_id":  "sample_10_prize",
+                          "source_path":  "assets/templates/digits/production/sample_10_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "7",
+                          "file":  "production/sample_10_prize_2_7.png",
+                          "sample_id":  "sample_10_prize",
+                          "source_path":  "assets/templates/digits/production/sample_10_prize_2_7.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_10_prize_3_2.png",
+                          "sample_id":  "sample_10_prize",
+                          "source_path":  "assets/templates/digits/production/sample_10_prize_3_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_10_prize_4_5.png",
+                          "sample_id":  "sample_10_prize",
+                          "source_path":  "assets/templates/digits/production/sample_10_prize_4_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_10_prize_5_0.png",
+                          "sample_id":  "sample_10_prize",
+                          "source_path":  "assets/templates/digits/production/sample_10_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_11_prize_1_2.png",
+                          "sample_id":  "sample_11_prize",
+                          "source_path":  "assets/templates/digits/production/sample_11_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "7",
+                          "file":  "production/sample_11_prize_2_7.png",
+                          "sample_id":  "sample_11_prize",
+                          "source_path":  "assets/templates/digits/production/sample_11_prize_2_7.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_11_prize_3_2.png",
+                          "sample_id":  "sample_11_prize",
+                          "source_path":  "assets/templates/digits/production/sample_11_prize_3_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_11_prize_4_5.png",
+                          "sample_id":  "sample_11_prize",
+                          "source_path":  "assets/templates/digits/production/sample_11_prize_4_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_11_prize_5_0.png",
+                          "sample_id":  "sample_11_prize",
+                          "source_path":  "assets/templates/digits/production/sample_11_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_13_prize_1_2.png",
+                          "sample_id":  "sample_13_prize",
+                          "source_path":  "assets/templates/digits/production/sample_13_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "7",
+                          "file":  "production/sample_13_prize_2_7.png",
+                          "sample_id":  "sample_13_prize",
+                          "source_path":  "assets/templates/digits/production/sample_13_prize_2_7.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_13_prize_3_2.png",
+                          "sample_id":  "sample_13_prize",
+                          "source_path":  "assets/templates/digits/production/sample_13_prize_3_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_13_prize_4_5.png",
+                          "sample_id":  "sample_13_prize",
+                          "source_path":  "assets/templates/digits/production/sample_13_prize_4_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_13_prize_5_0.png",
+                          "sample_id":  "sample_13_prize",
+                          "source_path":  "assets/templates/digits/production/sample_13_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_15_prize_1_2.png",
+                          "sample_id":  "sample_15_prize",
+                          "source_path":  "assets/templates/digits/production/sample_15_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "7",
+                          "file":  "production/sample_15_prize_2_7.png",
+                          "sample_id":  "sample_15_prize",
+                          "source_path":  "assets/templates/digits/production/sample_15_prize_2_7.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_15_prize_3_2.png",
+                          "sample_id":  "sample_15_prize",
+                          "source_path":  "assets/templates/digits/production/sample_15_prize_3_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_15_prize_4_5.png",
+                          "sample_id":  "sample_15_prize",
+                          "source_path":  "assets/templates/digits/production/sample_15_prize_4_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_15_prize_5_0.png",
+                          "sample_id":  "sample_15_prize",
+                          "source_path":  "assets/templates/digits/production/sample_15_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_16_prize_1_2.png",
+                          "sample_id":  "sample_16_prize",
+                          "source_path":  "assets/templates/digits/production/sample_16_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "7",
+                          "file":  "production/sample_16_prize_2_7.png",
+                          "sample_id":  "sample_16_prize",
+                          "source_path":  "assets/templates/digits/production/sample_16_prize_2_7.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_16_prize_3_2.png",
+                          "sample_id":  "sample_16_prize",
+                          "source_path":  "assets/templates/digits/production/sample_16_prize_3_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_16_prize_4_5.png",
+                          "sample_id":  "sample_16_prize",
+                          "source_path":  "assets/templates/digits/production/sample_16_prize_4_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_16_prize_5_0.png",
+                          "sample_id":  "sample_16_prize",
+                          "source_path":  "assets/templates/digits/production/sample_16_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_17_prize_1_2.png",
+                          "sample_id":  "sample_17_prize",
+                          "source_path":  "assets/templates/digits/production/sample_17_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "7",
+                          "file":  "production/sample_17_prize_2_7.png",
+                          "sample_id":  "sample_17_prize",
+                          "source_path":  "assets/templates/digits/production/sample_17_prize_2_7.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_17_prize_3_2.png",
+                          "sample_id":  "sample_17_prize",
+                          "source_path":  "assets/templates/digits/production/sample_17_prize_3_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_17_prize_4_5.png",
+                          "sample_id":  "sample_17_prize",
+                          "source_path":  "assets/templates/digits/production/sample_17_prize_4_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_17_prize_5_0.png",
+                          "sample_id":  "sample_17_prize",
+                          "source_path":  "assets/templates/digits/production/sample_17_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_20_prize_1_2.png",
+                          "sample_id":  "sample_20_prize",
+                          "source_path":  "assets/templates/digits/production/sample_20_prize_1_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "7",
+                          "file":  "production/sample_20_prize_2_7.png",
+                          "sample_id":  "sample_20_prize",
+                          "source_path":  "assets/templates/digits/production/sample_20_prize_2_7.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/sample_20_prize_3_2.png",
+                          "sample_id":  "sample_20_prize",
+                          "source_path":  "assets/templates/digits/production/sample_20_prize_3_2.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/sample_20_prize_4_5.png",
+                          "sample_id":  "sample_20_prize",
+                          "source_path":  "assets/templates/digits/production/sample_20_prize_4_5.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/sample_20_prize_5_0.png",
+                          "sample_id":  "sample_20_prize",
+                          "source_path":  "assets/templates/digits/production/sample_20_prize_5_0.png",
+                          "label_source":  "calibration_csv"
+                      },
+                      {
+                          "digit":  "4",
+                          "file":  "production/adb_raw_sample_02_1_4.png",
+                          "sample_id":  "adb_raw_sample_02",
+                          "source_path":  "assets/templates/digits/production/adb_raw_sample_02_1_4.png",
+                          "label_source":  "windows_ocr_profile"
+                      },
+                      {
+                          "digit":  "6",
+                          "file":  "production/adb_raw_sample_02_2_6.png",
+                          "sample_id":  "adb_raw_sample_02",
+                          "source_path":  "assets/templates/digits/production/adb_raw_sample_02_2_6.png",
+                          "label_source":  "windows_ocr_profile"
+                      },
+                      {
+                          "digit":  "9",
+                          "file":  "production/adb_raw_sample_02_3_9.png",
+                          "sample_id":  "adb_raw_sample_02",
+                          "source_path":  "assets/templates/digits/production/adb_raw_sample_02_3_9.png",
+                          "label_source":  "windows_ocr_profile"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/adb_raw_sample_02_4_0.png",
+                          "sample_id":  "adb_raw_sample_02",
+                          "source_path":  "assets/templates/digits/production/adb_raw_sample_02_4_0.png",
+                          "label_source":  "windows_ocr_profile"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/adb_raw_sample_02_5_0.png",
+                          "sample_id":  "adb_raw_sample_02",
+                          "source_path":  "assets/templates/digits/production/adb_raw_sample_02_5_0.png",
+                          "label_source":  "windows_ocr_profile"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/attached_23950_1_2.png",
+                          "sample_id":  "attached_23950",
+                          "source_path":  "assets/templates/digits/production/attached_23950_1_2.png",
+                          "label_source":  "attached_reference"
+                      },
+                      {
+                          "digit":  "3",
+                          "file":  "production/attached_23950_2_3.png",
+                          "sample_id":  "attached_23950",
+                          "source_path":  "assets/templates/digits/production/attached_23950_2_3.png",
+                          "label_source":  "attached_reference"
+                      },
+                      {
+                          "digit":  "9",
+                          "file":  "production/attached_23950_3_9.png",
+                          "sample_id":  "attached_23950",
+                          "source_path":  "assets/templates/digits/production/attached_23950_3_9.png",
+                          "label_source":  "attached_reference"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/attached_23950_4_5.png",
+                          "sample_id":  "attached_23950",
+                          "source_path":  "assets/templates/digits/production/attached_23950_4_5.png",
+                          "label_source":  "attached_reference"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/attached_23950_5_0.png",
+                          "sample_id":  "attached_23950",
+                          "source_path":  "assets/templates/digits/production/attached_23950_5_0.png",
+                          "label_source":  "attached_reference"
+                      },
+                      {
+                          "digit":  "6",
+                          "file":  "production/live_02_1_6.png",
+                          "sample_id":  "live_02",
+                          "source_path":  "assets/templates/digits/production/live_02_1_6.png",
+                          "label_source":  "windows_ocr_live"
+                      },
+                      {
+                          "digit":  "1",
+                          "file":  "production/live_02_2_1.png",
+                          "sample_id":  "live_02",
+                          "source_path":  "assets/templates/digits/production/live_02_2_1.png",
+                          "label_source":  "windows_ocr_live"
+                      },
+                      {
+                          "digit":  "2",
+                          "file":  "production/live_02_3_2.png",
+                          "sample_id":  "live_02",
+                          "source_path":  "assets/templates/digits/production/live_02_3_2.png",
+                          "label_source":  "windows_ocr_live"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/live_02_4_0.png",
+                          "sample_id":  "live_02",
+                          "source_path":  "assets/templates/digits/production/live_02_4_0.png",
+                          "label_source":  "windows_ocr_live"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/live_02_5_0.png",
+                          "sample_id":  "live_02",
+                          "source_path":  "assets/templates/digits/production/live_02_5_0.png",
+                          "label_source":  "windows_ocr_live"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/live_06_1_5.png",
+                          "sample_id":  "live_06",
+                          "source_path":  "assets/templates/digits/production/live_06_1_5.png",
+                          "label_source":  "windows_ocr_live"
+                      },
+                      {
+                          "digit":  "6",
+                          "file":  "production/live_06_2_6.png",
+                          "sample_id":  "live_06",
+                          "source_path":  "assets/templates/digits/production/live_06_2_6.png",
+                          "label_source":  "windows_ocr_live"
+                      },
+                      {
+                          "digit":  "1",
+                          "file":  "production/live_06_3_1.png",
+                          "sample_id":  "live_06",
+                          "source_path":  "assets/templates/digits/production/live_06_3_1.png",
+                          "label_source":  "windows_ocr_live"
+                      },
+                      {
+                          "digit":  "5",
+                          "file":  "production/live_06_4_5.png",
+                          "sample_id":  "live_06",
+                          "source_path":  "assets/templates/digits/production/live_06_4_5.png",
+                          "label_source":  "windows_ocr_live"
+                      },
+                      {
+                          "digit":  "0",
+                          "file":  "production/live_06_5_0.png",
+                          "sample_id":  "live_06",
+                          "source_path":  "assets/templates/digits/production/live_06_5_0.png",
+                          "label_source":  "windows_ocr_live"
+                      },
+                      {
+                          "digit":  "1",
+                          "file":  "production/manual_41000_digit_1.png",
+                          "sample_id":  "manual_41000_digit_1",
+                          "source_path":  "assets/templates/digits/production/manual_41000_digit_1.png",
+                          "label_source":  "manual_real_crop"
+                      },
+                      {
+                          "digit":  "8",
+                          "file":  "production/manual_29800_digit_8.png",
+                          "sample_id":  "manual_29800_digit_8",
+                          "source_path":  "assets/templates/digits/production/manual_29800_digit_8.png",
+                          "label_source":  "manual_real_crop"
+                      }
+                  ],
+    "coverage":  {
+                     "0":  21,
+                     "1":  3,
+                     "2":  24,
+                     "3":  2,
+                     "4":  1,
+                     "5":  16,
+                     "6":  5,
+                     "7":  9,
+                     "8":  1,
+                     "9":  5
+                 },
+    "missing_digits":  [
+
+                       ]
+}

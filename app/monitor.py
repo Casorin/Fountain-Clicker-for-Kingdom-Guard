@@ -1,0 +1,1600 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import Enum
+from pathlib import Path
+from typing import Callable
+from zoneinfo import ZoneInfo
+from collections import deque
+import json
+import os
+import shutil
+
+from PIL import Image
+
+from app.adb_client import AdbClient, AdbError
+from app.capture import crop_rect, save_screen
+from app.config import AppConfig
+from app.persistence import (
+    PersistedState,
+    ResetEvent,
+    UserRangeConfig,
+    load_reset_history,
+    save_reset_history,
+)
+from app.fast_ocr import PrefilterResult, prefilter_range, recognize_digits_from_templates
+from app.recognition import (
+    RecognitionResult,
+    save_prize_ocr_debug_variants,
+)
+from app.production_ocr import (
+    EngineReading,
+    NotificationAssessment,
+    NotificationVetoTracker,
+    ProductionOcrEngines,
+    ProductionOcrPipeline,
+    ProductionOcrResult,
+)
+from app.vision import AnchorStatus, analyze_anchors
+
+
+class MonitorPhase(str, Enum):
+    RESET_TIME_UNKNOWN = "RESET_TIME_UNKNOWN"
+    WAITING = "WAITING"
+    CANDIDATE = "CANDIDATE"
+    CONFIRMED = "CONFIRMED"
+    ACTIVE_CLICKING = "ACTIVE_CLICKING"
+    CHECKING_AFTER_BURST = "CHECKING_AFTER_BURST"
+    RESET_COOLDOWN = "RESET_COOLDOWN"
+    PAUSED = "PAUSED"
+    EMERGENCY_STOP = "EMERGENCY_STOP"
+
+
+class OcrStatus(str, Enum):
+    VISIBLE = "Число видно"
+    OBSCURED = "Закрыто уведомлением"
+    TIMEOUT = "Windows OCR timeout"
+    ERROR = "Ошибка распознавания"
+    SKIPPED = "Windows OCR пропущен prefilter"
+
+@dataclass
+class MonitorState:
+    phase: MonitorPhase = MonitorPhase.RESET_TIME_UNKNOWN
+    ocr_status: OcrStatus = OcrStatus.ERROR
+    last_value: int | None = None
+    raw_ocr_value: int | None = None
+    trusted_value: int | None = None
+    last_trust_reason: str = ""
+    last_status: str = "Ожидание"
+    candidate_value: int | None = None
+    candidate_hits: int = 0
+    reset_candidate_hits: int = 0
+    reset_candidate_value: int | None = None
+    test_mode: bool = True
+    real_mode_armed: bool = False
+    last_reset_at: datetime | None = None
+    last_reset_confirmed_at: datetime | None = None
+    cooldown_until: datetime | None = None
+    reset_time_known: bool = False
+    unknown_since: datetime | None = None
+    last_confirmed_prize: int | None = None
+    last_trusted_at: datetime | None = None
+    reset_last_high_at: datetime | None = None
+    reset_first_low_at: datetime | None = None
+    reset_first_low_value: int | None = None
+    peak_since_reset: int | None = None
+    post_reset_baseline: int | None = None
+    reset_episode_locked: bool = False
+    reset_growth_hits: int = 0
+    reset_growth_last_value: int | None = None
+    reset_growth_last_capture_id: str | None = None
+    reset_growth_last_at: datetime | None = None
+    reset_new_cycle_confirmed: bool = False
+    reset_unlock_reason: str = ""
+    reset_episode_token: int = 0
+    last_recorded_reset_episode_token: int | None = None
+    manual_reset_block_real_taps: bool = False
+    burst_taps_done: int = 0
+    total_taps: int = 0
+    next_click_at: datetime | None = None
+    checking_until: datetime | None = None
+    last_full_ocr_at: datetime | None = None
+    last_prefilter_digit_count: int | None = None
+    last_prefilter_first_digit: int | None = None
+    test_range_override_enabled: bool = True
+    growth_candidate_value: int | None = None
+    growth_candidate_at: datetime | None = None
+    notification_veto: bool = False
+    notification_heavy: bool = False
+    notification_recovery_hits: int = 0
+    last_tap_sent_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class PollSnapshot:
+    timestamp: str
+    value: int | None
+    raw_value: int | None
+    trusted_value: int | None
+    status: str
+    phase: MonitorPhase
+    ocr_status: OcrStatus
+    confirmation_hits: int
+    in_range: bool
+    event_screen_ok: bool
+    button_visible: bool
+    title_score: float
+    screen_anchor_score: float
+    button_score: float
+    button_gold_ratio: float
+    title_text: str
+    button_text: str
+    prefilter_status: str
+    prefilter_confidence: float
+    prefilter_digit_count: int | None
+    prefilter_first_digit: int | None
+    recognition: RecognitionResult
+    clicked: bool
+    would_tap: bool
+    diagnostics_dir: str | None
+    last_reset_at: str
+    last_reset_confirmed_at: str
+    seconds_since_reset: int | None
+    cooldown_remaining: int | None
+    active_burst_taps: int
+    total_taps: int
+    reset_history_rows: list[tuple[str, str, str, str]]
+    reset_average_label: str
+    reset_min_label: str
+    reset_max_label: str
+    reset_since_history_label: str
+    since_reset_label: str
+    cooldown_label: str
+    mode_banner: str
+    target_range_label: str
+    editable_test_range_label: str
+    real_taps_label: str
+    tap_events: list[str]
+    capture_ms: float
+    fast_observation_ms: float
+    authoritative_ocr_ms: float | None
+    authoritative_ocr_ran: bool
+    notification_veto: bool
+    notification_heavy: bool
+    notification_recovery_hits: int
+    paddle_control_ran: bool
+
+
+class PrizeMonitor:
+    def __init__(self, config: AppConfig, now_provider: Callable[[], datetime] | None = None) -> None:
+        self.config = config
+        self.adb = AdbClient(config.adb_path, config.adb_serial)
+        self._now_provider = now_provider or datetime.now
+        self.state = MonitorState()
+        self.state.test_range_override_enabled = config.test_range_override_enabled
+        self.user_range = UserRangeConfig.load(
+            self.config.user_config_path,
+            self.config.test_mode_min_prize,
+            self.config.test_mode_max_prize,
+        )
+        self.reset_history: list[ResetEvent] = load_reset_history(self.config.reset_history_path)
+        self.recent_observations: deque[dict[str, object]] = deque(maxlen=40)
+        self.recent_prize_crops: deque[Image.Image] = deque(maxlen=5)
+        self._latest_screen: Image.Image | None = None
+        self._latest_prize_crop: Image.Image | None = None
+        self._latest_capture_completed_at: datetime | None = None
+        self._last_production_ocr: ProductionOcrResult | None = None
+        self._ocr_pipeline = ProductionOcrPipeline(
+            engines=ProductionOcrEngines(),
+            notification_tracker=NotificationVetoTracker(config.notification_dark_ratio_threshold),
+            compatible_growth=config.realistic_growth_slack,
+        )
+        self.tap_decisions_enabled = os.environ.get("KGPM_DISABLE_TAP_DECISIONS", "0") != "1"
+        self._load_persisted_state()
+
+    def _now(self) -> datetime:
+        return self._now_provider()
+
+    def _load_persisted_state(self) -> None:
+        persisted = PersistedState.load(self.config.state_path)
+        now = self._now()
+        self.state.last_reset_at = persisted.last_reset_at
+        self.state.last_reset_confirmed_at = persisted.last_reset_confirmed_at
+        self.state.cooldown_until = persisted.cooldown_until
+        self.state.last_confirmed_prize = persisted.last_confirmed_prize
+        self.state.last_trusted_at = persisted.last_trusted_at
+        self.state.peak_since_reset = persisted.peak_since_reset
+        self.state.post_reset_baseline = persisted.post_reset_baseline
+        self.state.reset_time_known = persisted.reset_time_known
+        self.state.unknown_since = persisted.unknown_since or now
+        self.state.reset_episode_locked = persisted.reset_episode_locked
+        self.state.reset_growth_hits = persisted.reset_growth_hits
+        self.state.reset_growth_last_value = persisted.reset_growth_last_value
+        self.state.reset_growth_last_capture_id = persisted.reset_growth_last_capture_id
+        self.state.reset_growth_last_at = persisted.reset_growth_last_at
+        self.state.reset_new_cycle_confirmed = persisted.reset_new_cycle_confirmed
+        self.state.reset_unlock_reason = persisted.reset_unlock_reason
+        self.state.reset_episode_token = persisted.reset_episode_token
+        self.state.last_recorded_reset_episode_token = persisted.last_recorded_reset_episode_token
+        self.state.manual_reset_block_real_taps = persisted.manual_reset_block_real_taps
+        if (
+            self.state.reset_episode_locked
+            and self.state.post_reset_baseline is None
+            and self.reset_history
+        ):
+            self.state.post_reset_baseline = self.reset_history[0].value_after_reset
+            if self.state.post_reset_baseline is not None:
+                # Legacy state has no independent-frame evidence for its stored peak.
+                # Start a fresh trusted sequence without reconstructing a missed reset.
+                self.state.last_confirmed_prize = None
+                self.state.last_trusted_at = None
+                self.state.peak_since_reset = self.state.post_reset_baseline
+                self.state.reset_growth_hits = 0
+                self.state.reset_growth_last_value = None
+                self.state.reset_growth_last_capture_id = None
+                self.state.reset_growth_last_at = None
+                self.state.reset_new_cycle_confirmed = False
+                self.state.reset_unlock_reason = "LOCKED: migrated legacy state; waiting for confirmed new high cycle"
+        if self.state.cooldown_until and self.state.cooldown_until > now:
+            self.state.phase = MonitorPhase.RESET_COOLDOWN
+        elif self.state.reset_time_known:
+            self.state.phase = MonitorPhase.WAITING
+        else:
+            self.state.phase = MonitorPhase.RESET_TIME_UNKNOWN
+
+    def _save_persisted_state(self) -> None:
+        PersistedState(
+            last_reset_at=self.state.last_reset_at,
+            last_reset_confirmed_at=self.state.last_reset_confirmed_at,
+            cooldown_until=self.state.cooldown_until,
+            last_confirmed_prize=self.state.last_confirmed_prize,
+            last_trusted_at=self.state.last_trusted_at,
+            peak_since_reset=self.state.peak_since_reset,
+            post_reset_baseline=self.state.post_reset_baseline,
+            reset_time_known=self.state.reset_time_known,
+            unknown_since=self.state.unknown_since,
+            reset_episode_locked=self.state.reset_episode_locked,
+            reset_growth_hits=self.state.reset_growth_hits,
+            reset_growth_last_value=self.state.reset_growth_last_value,
+            reset_growth_last_capture_id=self.state.reset_growth_last_capture_id,
+            reset_growth_last_at=self.state.reset_growth_last_at,
+            reset_new_cycle_confirmed=self.state.reset_new_cycle_confirmed,
+            reset_unlock_reason=self.state.reset_unlock_reason,
+            reset_episode_token=self.state.reset_episode_token,
+            last_recorded_reset_episode_token=self.state.last_recorded_reset_episode_token,
+            manual_reset_block_real_taps=self.state.manual_reset_block_real_taps,
+        ).save(self.config.state_path)
+
+    @staticmethod
+    def _local_zone() -> ZoneInfo:
+        return ZoneInfo("Europe/Samara")
+
+    @staticmethod
+    def _format_duration(seconds: int | None) -> str:
+        if seconds is None:
+            return "Неизвестно"
+        hours, remainder = divmod(max(0, seconds), 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"{hours} ч {minutes:02d} мин {secs:02d} сек"
+        if minutes:
+            return f"{minutes} мин {secs:02d} сек"
+        return f"{secs} сек"
+
+    @staticmethod
+    def _event_time_for_history(event: ResetEvent) -> str:
+        return event.reset_event_at or event.timestamp_reset
+
+    def _history_rows(self) -> list[tuple[str, str, str, str]]:
+        rows: list[tuple[str, str, str, str]] = []
+        for index, event in enumerate(self.reset_history[:10], start=1):
+            dt = datetime.fromisoformat(self._event_time_for_history(event))
+            local = dt.astimezone(self._local_zone())
+            interval = self._format_duration(self._interval_seconds_for_index(index - 1))
+            peak = str(event.peak_before_reset) if event.peak_before_reset is not None else "нет данных"
+            rows.append((str(index), local.strftime("%H:%M:%S"), peak, interval))
+        return rows
+
+    def _history_stats(self) -> tuple[str, str, str]:
+        intervals = [
+            seconds
+            for index in range(len(self.reset_history))
+            if (seconds := self._interval_seconds_for_index(index)) is not None
+        ]
+        if len(intervals) < 1:
+            return ("недостаточно данных", "недостаточно данных", "недостаточно данных")
+        average = int(sum(intervals) / len(intervals))
+        return (
+            self._format_duration(average),
+            self._format_duration(min(intervals)),
+            self._format_duration(max(intervals)),
+        )
+
+    def _history_since_reset_label(self, now: datetime) -> str:
+        if not self.reset_history:
+            return "неизвестно"
+        try:
+            newest = datetime.fromisoformat(self._event_time_for_history(self.reset_history[0])).astimezone(self._local_zone())
+        except ValueError:
+            return "неизвестно"
+        return self._format_duration(max(0, int((now.astimezone(self._local_zone()) - newest).total_seconds())))
+
+    def _interval_seconds_for_index(self, index: int) -> int | None:
+        if index < 0 or index >= len(self.reset_history):
+            return None
+        if index >= len(self.reset_history) - 1:
+            return self.reset_history[index].interval_seconds
+        try:
+            current = datetime.fromisoformat(self._event_time_for_history(self.reset_history[index]))
+            previous = datetime.fromisoformat(self._event_time_for_history(self.reset_history[index + 1]))
+        except ValueError:
+            return self.reset_history[index].interval_seconds
+        return max(0, int((current - previous).total_seconds()))
+
+    def _backups_dir(self) -> Path:
+        return self.config.runtime_dir / "backups"
+
+    def _history_audit_log_path(self) -> Path:
+        return self.config.runtime_dir / "manual_history_actions.log"
+
+    def _backup_reset_history(self, reason: str) -> Path:
+        backups_dir = self._backups_dir()
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        stamp = self._now().astimezone(self._local_zone()).strftime("%Y%m%d_%H%M%S")
+        target = backups_dir / f"production_reset_history_before_{reason}_{stamp}.json"
+        if self.config.reset_history_path.exists():
+            shutil.copy2(self.config.reset_history_path, target)
+        else:
+            target.write_text("[]", encoding="utf-8")
+        return target
+
+    def _log_history_action(
+        self,
+        action: str,
+        deleted_reset_timestamp: str | None = None,
+        deleted_peak: int | None = None,
+    ) -> None:
+        log_path = self._history_audit_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "timestamp": self._now().astimezone(self._local_zone()).isoformat(),
+            "action": action,
+            "deleted_reset_timestamp": deleted_reset_timestamp,
+            "deleted_peak": deleted_peak,
+        }
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def _recalculate_reset_history_intervals(self, events: list[ResetEvent]) -> list[ResetEvent]:
+        recalculated: list[ResetEvent] = []
+        for index, event in enumerate(events):
+            interval_seconds: int | None = None
+            if index + 1 < len(events):
+                try:
+                    current = datetime.fromisoformat(self._event_time_for_history(event))
+                    previous = datetime.fromisoformat(self._event_time_for_history(events[index + 1]))
+                    interval_seconds = max(0, int((current - previous).total_seconds()))
+                except ValueError:
+                    interval_seconds = event.interval_seconds
+            recalculated.append(
+                ResetEvent(
+                    timestamp_reset=event.timestamp_reset,
+                    reset_event_at=event.reset_event_at,
+                    reset_confirmed_at=event.reset_confirmed_at,
+                    last_high_at=event.last_high_at,
+                    first_low_at=event.first_low_at,
+                    peak_before_reset=event.peak_before_reset,
+                    value_after_reset=event.value_after_reset,
+                    drop_amount=event.drop_amount,
+                    interval_seconds=interval_seconds,
+                )
+            )
+        return recalculated
+
+    def delete_reset_history_entry(self, visible_index: int) -> tuple[bool, str]:
+        if visible_index < 0 or visible_index >= len(self.reset_history):
+            return False, "Выбранная запись не найдена"
+        backup_path = self._backup_reset_history("manual_delete")
+        deleted = self.reset_history.pop(visible_index)
+        self.reset_history = self._recalculate_reset_history_intervals(self.reset_history)
+        save_reset_history(self.config.reset_history_path, self.reset_history)
+        self._log_history_action("manual_delete", deleted.timestamp_reset, deleted.peak_before_reset)
+        return (
+            True,
+            f"Удалена запись {deleted.timestamp_reset} (peak={deleted.peak_before_reset if deleted.peak_before_reset is not None else 'нет данных'}). "
+            f"Backup: {backup_path}",
+        )
+
+    def clear_reset_history(self) -> tuple[bool, str]:
+        backup_path = self._backup_reset_history("manual_clear_all")
+        deleted_events = list(self.reset_history)
+        self.reset_history = []
+        save_reset_history(self.config.reset_history_path, self.reset_history)
+        for event in deleted_events:
+            self._log_history_action("manual_delete", event.timestamp_reset, event.peak_before_reset)
+        self._log_history_action("manual_clear_all", None, None)
+        return True, f"Вся production-история очищена. Backup: {backup_path}"
+
+    def _format_since_reset_label(self, now: datetime) -> str:
+        seconds = self._seconds_since_reset(now)
+        if seconds is None:
+            return "—"
+        return self._format_duration(seconds)
+
+    def _append_reset_history(
+        self,
+        peak_before_reset: int | None,
+        value_after_reset: int | None,
+        event_at: datetime,
+        confirmed_at: datetime,
+        last_high_at: datetime | None,
+        first_low_at: datetime | None,
+    ) -> None:
+        if self.state.last_recorded_reset_episode_token == self.state.reset_episode_token:
+            return
+        aware_event = event_at.astimezone(self._local_zone())
+        aware_confirmed = confirmed_at.astimezone(self._local_zone())
+        if self.reset_history:
+            try:
+                newest = datetime.fromisoformat(self._event_time_for_history(self.reset_history[0])).astimezone(self._local_zone())
+                gap_seconds = int((aware_event - newest).total_seconds())
+                if gap_seconds < self.config.min_reset_interval_seconds:
+                    self.state.last_status = (
+                        f"Reset history blocked: impossible interval {gap_seconds}с < "
+                        f"{self.config.min_reset_interval_seconds}с"
+                    )
+                    return
+            except ValueError:
+                pass
+        previous_dt = (
+            datetime.fromisoformat(self._event_time_for_history(self.reset_history[0])).astimezone(self._local_zone())
+            if self.reset_history
+            else None
+        )
+        interval_seconds = int((aware_event - previous_dt).total_seconds()) if previous_dt else None
+        if self.reset_history and self._event_time_for_history(self.reset_history[0]) == aware_event.isoformat():
+            return
+        if self.reset_history:
+            try:
+                newest = datetime.fromisoformat(self._event_time_for_history(self.reset_history[0])).astimezone(self._local_zone())
+                if abs((aware_event - newest).total_seconds()) < 1:
+                    return
+            except ValueError:
+                pass
+        drop_amount = None
+        if peak_before_reset is not None and value_after_reset is not None:
+            drop_amount = peak_before_reset - value_after_reset
+        event = ResetEvent(
+            timestamp_reset=aware_event.isoformat(),
+            reset_event_at=aware_event.isoformat(),
+            reset_confirmed_at=aware_confirmed.isoformat(),
+            last_high_at=last_high_at.astimezone(self._local_zone()).isoformat() if last_high_at else None,
+            first_low_at=first_low_at.astimezone(self._local_zone()).isoformat() if first_low_at else None,
+            peak_before_reset=peak_before_reset,
+            value_after_reset=value_after_reset,
+            drop_amount=drop_amount,
+            interval_seconds=interval_seconds,
+        )
+        self.reset_history.insert(0, event)
+        self.state.last_recorded_reset_episode_token = self.state.reset_episode_token
+        save_reset_history(self.config.reset_history_path, self.reset_history)
+
+    def connect(self) -> tuple[bool, str]:
+        try:
+            connect_output = self.adb.connect()
+            devices = self.adb.devices()
+        except AdbError as exc:
+            return False, str(exc)
+
+        if self.config.adb_serial not in devices:
+            return False, f"ADB подключён, но устройство {self.config.adb_serial} не видно"
+        return True, connect_output or "Подключено"
+
+    def set_real_mode(self, enabled: bool) -> tuple[bool, str]:
+        self.state.real_mode_armed = enabled
+        self.state.test_mode = not enabled
+        self.state.last_status = "Реальный режим включён" if enabled else "Тестовый режим включён"
+        return True, self.state.last_status
+
+    def pause(self) -> None:
+        self.state.phase = MonitorPhase.PAUSED
+        self.state.last_status = "Мониторинг приостановлен"
+
+    def emergency_stop(self) -> None:
+        self.state.phase = MonitorPhase.EMERGENCY_STOP
+        self.state.last_status = "Аварийная остановка"
+
+    def resume(self) -> None:
+        if self.state.phase in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}:
+            self.state.phase = (
+                MonitorPhase.WAITING if self.state.reset_time_known else MonitorPhase.RESET_TIME_UNKNOWN
+            )
+            self.state.last_status = "Мониторинг возобновлён"
+
+    def reset_lock(self) -> None:
+        now = self._now()
+        self.state.last_value = None
+        self.state.raw_ocr_value = None
+        self.state.trusted_value = None
+        self.state.candidate_value = None
+        self.state.candidate_hits = 0
+        self.state.reset_candidate_hits = 0
+        self.state.reset_candidate_value = None
+        self.state.last_reset_at = None
+        self.state.last_reset_confirmed_at = None
+        self.state.cooldown_until = None
+        self.state.last_confirmed_prize = None
+        self.state.last_trusted_at = None
+        self.state.reset_last_high_at = None
+        self.state.reset_first_low_at = None
+        self.state.reset_first_low_value = None
+        self.state.peak_since_reset = None
+        self.state.post_reset_baseline = None
+        self.state.ocr_status = OcrStatus.ERROR
+        self.state.reset_episode_locked = False
+        self.state.reset_growth_hits = 0
+        self.state.reset_growth_last_value = None
+        self.state.reset_growth_last_capture_id = None
+        self.state.reset_growth_last_at = None
+        self.state.reset_new_cycle_confirmed = False
+        self.state.reset_unlock_reason = ""
+        self.state.last_trust_reason = ""
+        self.state.reset_episode_token += 1
+        self.state.last_recorded_reset_episode_token = None
+        self.state.burst_taps_done = 0
+        self.state.total_taps = 0
+        self.state.next_click_at = None
+        self.state.checking_until = None
+        self.state.last_full_ocr_at = None
+        self.state.last_prefilter_digit_count = None
+        self.state.last_prefilter_first_digit = None
+        self.state.growth_candidate_value = None
+        self.state.growth_candidate_at = None
+        self.recent_prize_crops.clear()
+        if self.state.real_mode_armed:
+            self.state.reset_time_known = False
+            self.state.unknown_since = now
+            self.state.manual_reset_block_real_taps = True
+            self.state.phase = MonitorPhase.RESET_TIME_UNKNOWN
+            self.state.last_status = (
+                "Состояние сброшено вручную: реальные tap заблокированы до нового достоверного reset"
+            )
+        else:
+            self.state.reset_time_known = True
+            self.state.unknown_since = None
+            self.state.manual_reset_block_real_taps = False
+            self.state.phase = MonitorPhase.WAITING
+            self.state.last_status = "Состояние мониторинга сброшено вручную"
+        self._save_persisted_state()
+
+    def target_range_for_mode(self, real_mode: bool | None = None) -> tuple[int, int]:
+        _active_real_mode = self.state.real_mode_armed if real_mode is None else real_mode
+        return self.user_range.test_min_prize, self.user_range.test_max_prize
+
+    def editable_test_range_label(self) -> str:
+        return f"{self.user_range.test_min_prize} - {self.user_range.test_max_prize}"
+
+    def update_test_range(self, min_value: int, max_value: int) -> tuple[bool, str]:
+        if min_value < 1000:
+            return False, "Минимальное значение должно быть не меньше 1000"
+        if max_value > 999_999:
+            return False, "Максимальное значение должно быть не больше 999999"
+        if min_value >= max_value:
+            return False, "Минимальное значение должно быть меньше максимального"
+        self.user_range = UserRangeConfig(test_min_prize=min_value, test_max_prize=max_value)
+        self.user_range.save(self.config.user_config_path)
+        self.state.last_status = f"Сохранён тестовый диапазон: {min_value} - {max_value}"
+        return True, self.state.last_status
+
+    def is_target_value(self, value: int, real_mode: bool | None = None) -> bool:
+        lower, upper = self.target_range_for_mode(real_mode)
+        return lower <= value <= upper
+
+    def mode_banner(self) -> str:
+        if self.state.real_mode_armed:
+            return "РЕАЛЬНЫЙ ДИАПАЗОН"
+        return "ТЕСТОВЫЙ РЕЖИМ"
+
+    def target_range_label(self) -> str:
+        lower, upper = self.target_range_for_mode()
+        return f"{lower:,}–{upper:,}".replace(",", " ")
+
+    def real_taps_label(self) -> str:
+        if self.state.real_mode_armed:
+            if self.state.manual_reset_block_real_taps:
+                return "РЕАЛЬНЫЕ TAP ЗАБЛОКИРОВАНЫ ДО НОВОГО RESET"
+            return "РЕАЛЬНЫЕ TAP РАЗРЕШЕНЫ"
+        return "РЕАЛЬНЫЕ TAP ЗАПРЕЩЕНЫ"
+
+    def _append_observation(
+        self,
+        now: datetime,
+        recognition: RecognitionResult,
+        anchors: AnchorStatus,
+        prefilter: PrefilterResult,
+    ) -> None:
+        frame_timestamp = now.astimezone(self._local_zone()).isoformat()
+        capture_id = now.astimezone(self._local_zone()).strftime("%Y%m%d_%H%M%S_%f")
+        self.recent_observations.append(
+            {
+                "timestamp": frame_timestamp,
+                "capture_id": capture_id,
+                "frame_timestamp": frame_timestamp,
+                "ocr_source": f"{recognition.method}:{recognition.variant_name}",
+                "raw_value": self.state.raw_ocr_value,
+                "trusted_value": self.state.trusted_value,
+                "ocr_method": recognition.method,
+                "ocr_status": self.state.ocr_status.value,
+                "screen_ok": anchors.event_screen_ok,
+                "button_ok": anchors.button_visible,
+                "prefilter_status": prefilter.status,
+                "prefilter_reason": prefilter.reason,
+                "prefilter_digit_count": prefilter.digit_count,
+                "trust_reason": self.state.last_trust_reason,
+                "confirmed_peak": self.state.peak_since_reset,
+                "post_reset_baseline": self.state.post_reset_baseline,
+                "reset_candidate_hits": self.state.reset_candidate_hits,
+                "reset_episode_locked": self.state.reset_episode_locked,
+                "last_reset_at": self.state.last_reset_at.isoformat() if self.state.last_reset_at else None,
+                "seconds_since_reset": self._seconds_since_reset(now),
+                "new_cycle_high_hits": self.state.reset_growth_hits,
+                "new_cycle_confirmed": self.state.reset_new_cycle_confirmed,
+                "unlock_reason": self.state.reset_unlock_reason,
+            }
+        )
+
+    def _save_reset_diagnostics(
+        self,
+        now: datetime,
+        label: str,
+        recognition: RecognitionResult | None = None,
+        anchors: AnchorStatus | None = None,
+        prefilter: PrefilterResult | None = None,
+        reset_event_at: datetime | None = None,
+        reset_confirmed_at: datetime | None = None,
+    ) -> Path:
+        target_dir = self.config.reset_diagnostics_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        stamp = now.astimezone(self._local_zone()).strftime("%Y%m%d_%H%M%S_%f")
+        path = target_dir / f"{stamp}_{label}.json"
+        screen_path = target_dir / f"{stamp}_{label}_screen.png"
+        crop_path = target_dir / f"{stamp}_{label}_prize_crop.png"
+        if self._latest_screen is not None:
+            self._latest_screen.save(screen_path)
+        if self._latest_prize_crop is not None:
+            self._latest_prize_crop.save(crop_path)
+        payload = {
+            "label": label,
+            "capture_id": stamp,
+            "frame_timestamp": now.astimezone(self._local_zone()).isoformat(),
+            "ocr_source": (
+                f"{recognition.method}:{recognition.variant_name}" if recognition else None
+            ),
+            "screen_path": str(screen_path) if screen_path.exists() else None,
+            "prize_crop_path": str(crop_path) if crop_path.exists() else None,
+            "last_reset_at": self.state.last_reset_at.isoformat() if self.state.last_reset_at else None,
+            "last_reset_confirmed_at": (
+                self.state.last_reset_confirmed_at.isoformat() if self.state.last_reset_confirmed_at else None
+            ),
+            "confirmed_peak": self.state.peak_since_reset,
+            "post_reset_baseline": self.state.post_reset_baseline,
+            "last_confirmed_prize": self.state.last_confirmed_prize,
+            "last_trusted_value": self.state.last_confirmed_prize,
+            "last_trusted_at": self.state.last_trusted_at.isoformat() if self.state.last_trusted_at else None,
+            "last_high_at": self.state.reset_last_high_at.isoformat() if self.state.reset_last_high_at else None,
+            "first_low_value": self.state.reset_first_low_value,
+            "first_low_at": self.state.reset_first_low_at.isoformat() if self.state.reset_first_low_at else None,
+            "reset_event_at": reset_event_at.isoformat() if reset_event_at else None,
+            "reset_confirmed_at": reset_confirmed_at.isoformat() if reset_confirmed_at else None,
+            "confirmation_delay_seconds": (
+                round((reset_confirmed_at - reset_event_at).total_seconds(), 3)
+                if reset_event_at and reset_confirmed_at
+                else None
+            ),
+            "raw_ocr_value": self.state.raw_ocr_value,
+            "trusted_value": self.state.trusted_value,
+            "trust_reason": self.state.last_trust_reason,
+            "reset_candidate_hits": self.state.reset_candidate_hits,
+            "reset_candidate_value": self.state.reset_candidate_value,
+            "reset_episode_locked": self.state.reset_episode_locked,
+            "seconds_since_reset": self._seconds_since_reset(now),
+            "new_cycle_high_hits": self.state.reset_growth_hits,
+            "new_cycle_confirmed": self.state.reset_new_cycle_confirmed,
+            "unlock_reason": self.state.reset_unlock_reason,
+            "ocr_method": recognition.method if recognition else None,
+            "ocr_raw_text": recognition.raw_text if recognition else None,
+            "ocr_normalized_text": recognition.normalized_text if recognition else None,
+            "ocr_fast_reason": recognition.fast_reason if recognition else None,
+            "prefilter_status": prefilter.status if prefilter else None,
+            "prefilter_reason": prefilter.reason if prefilter else None,
+            "prefilter_timings_ms": prefilter.timings_ms if prefilter else None,
+            "screen_ok": anchors.event_screen_ok if anchors else None,
+            "button_ok": anchors.button_visible if anchors else None,
+            "observations": list(self.recent_observations),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
+
+    def _update_peak_tracking(self, value: int, recognition: RecognitionResult) -> None:
+        if recognition.method in {"prefilter_skip", "windows_ocr_timeout"}:
+            return
+        if self.state.peak_since_reset is None or value > self.state.peak_since_reset:
+            self.state.peak_since_reset = value
+
+    def _is_reset_first_low_value(self, value: int) -> bool:
+        return self.config.reset_low_min_value <= value <= self.config.reset_low_max_value
+
+    def _is_reset_confirmation_value(self, value: int) -> bool:
+        return self.config.reset_low_min_value <= value <= self.config.reset_confirmation_max_value
+
+    def _looks_like_reset_transition(self, previous_value: int, new_value: int) -> bool:
+        if not self._is_reset_first_low_value(new_value):
+            return False
+        return previous_value > self.config.reset_low_max_value
+
+    def _is_reset_confirmation_frame(self, value: int | None) -> bool:
+        if value is None or self.state.reset_candidate_hits <= 0:
+            return False
+        first_low_value = self.state.reset_first_low_value
+        if first_low_value is None:
+            return False
+        return self._is_reset_confirmation_value(value)
+
+    def _save_outlier_diagnostics(
+        self,
+        screen: Image.Image,
+        prize_crop: Image.Image,
+        recognition: RecognitionResult,
+        now: datetime,
+        reason: str,
+    ) -> Path:
+        target_dir = self.config.debug_dir / "ocr_outliers" / now.astimezone(self._local_zone()).strftime("%Y%m%d_%H%M%S_%f")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        screen.save(target_dir / "screen.png")
+        prize_crop.save(target_dir / "prize_crop.png")
+        save_prize_ocr_debug_variants(prize_crop, target_dir)
+        (target_dir / "decision.txt").write_text(
+            "\n".join(
+                [
+                    f"raw_value={recognition.value}",
+                    f"raw_text={recognition.normalized_text}",
+                    f"variant={recognition.variant_name}",
+                    f"method={recognition.method}",
+                    f"reason={reason}",
+                    f"candidates={recognition.fast_reason}",
+                    f"last_trusted={self.state.last_confirmed_prize}",
+                    f"last_trusted_at={self.state.last_trusted_at.isoformat() if self.state.last_trusted_at else ''}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return target_dir
+
+    def _resolve_trusted_value(self, raw_value: int | None, now: datetime) -> tuple[int | None, str]:
+        if raw_value is None:
+            return None, "no raw OCR value"
+        previous_trusted = self.state.last_confirmed_prize
+        if previous_trusted is None or self.state.last_trusted_at is None:
+            self.state.growth_candidate_value = None
+            self.state.growth_candidate_at = None
+            return raw_value, "accepted initial trusted value"
+        if raw_value == previous_trusted:
+            self.state.growth_candidate_value = None
+            self.state.growth_candidate_at = None
+            return raw_value, "same as previous trusted value"
+        if raw_value < previous_trusted:
+            self.state.growth_candidate_value = None
+            self.state.growth_candidate_at = None
+            reference_peak = max(previous_trusted, self.state.peak_since_reset or previous_trusted)
+            if self._looks_like_reset_transition(reference_peak, raw_value):
+                return raw_value, "accepted as reset low value"
+            if self._is_reset_confirmation_frame(raw_value):
+                return raw_value, "accepted as reset confirmation continuation"
+            return None, f"rejected backward jump {previous_trusted}->{raw_value}"
+        if self._is_reset_confirmation_frame(raw_value):
+            return raw_value, "accepted as reset growth continuation"
+
+        elapsed = max(0.10, (now - self.state.last_trusted_at).total_seconds())
+        allowed_growth = int(self.config.max_realistic_growth_per_second * elapsed + self.config.realistic_growth_slack)
+        growth = raw_value - previous_trusted
+        if growth <= self.config.realistic_growth_slack:
+            self.state.growth_candidate_value = None
+            self.state.growth_candidate_at = None
+            return raw_value, f"accepted ordinary growth +{growth}"
+        if growth <= allowed_growth:
+            pending = self.state.growth_candidate_value
+            pending_at = self.state.growth_candidate_at
+            if pending is not None and pending_at is not None:
+                confirmation_elapsed = max(0.10, (now - pending_at).total_seconds())
+                confirmation_growth = raw_value - pending
+                confirmation_limit = int(
+                    self.config.max_realistic_growth_per_second * confirmation_elapsed
+                    + self.config.realistic_growth_slack
+                )
+                if 0 <= confirmation_growth <= confirmation_limit:
+                    self.state.growth_candidate_value = None
+                    self.state.growth_candidate_at = None
+                    return raw_value, f"accepted growth after independent frame {pending}->{raw_value}"
+            self.state.growth_candidate_value = raw_value
+            self.state.growth_candidate_at = now
+            return None, (
+                f"suspicious growth pending independent frame: "
+                f"{previous_trusted}->{raw_value}"
+            )
+        return None, f"rejected OCR outlier growth +{raw_value - previous_trusted} > {allowed_growth}"
+
+    def _update_reset_episode_lock(
+        self,
+        value: int | None,
+        now: datetime | None = None,
+        capture_id: str | None = None,
+    ) -> None:
+        if not self.state.reset_episode_locked or value is None:
+            return
+
+        now = now or self._now()
+        capture_id = capture_id or now.astimezone(self._local_zone()).strftime("%Y%m%d_%H%M%S_%f")
+        seconds_since_reset = self._seconds_since_reset(now)
+        baseline = self.state.post_reset_baseline
+        if baseline is None:
+            self.state.reset_unlock_reason = "LOCKED: waiting for post-reset baseline"
+            return
+
+        if value <= baseline:
+            self.state.reset_growth_hits = 0
+            self.state.reset_growth_last_value = None
+            self.state.reset_growth_last_capture_id = None
+            self.state.reset_growth_last_at = None
+            self.state.reset_new_cycle_confirmed = False
+            self.state.reset_unlock_reason = (
+                "LOCKED: waiting for 120s"
+                if seconds_since_reset is None or seconds_since_reset < self.config.min_reset_interval_seconds
+                else "LOCKED: 120s passed, waiting for confirmed new high cycle"
+            )
+            return
+
+        if capture_id == self.state.reset_growth_last_capture_id:
+            return
+
+        if self.state.reset_growth_last_value is None or value > self.state.reset_growth_last_value:
+            self.state.reset_growth_hits += 1
+        elif value < self.state.reset_growth_last_value:
+            self.state.reset_growth_hits = 1
+        self.state.reset_growth_last_value = value
+        self.state.reset_growth_last_capture_id = capture_id
+        self.state.reset_growth_last_at = now
+
+        peak_confirmed = (
+            self.state.peak_since_reset is not None
+            and self.state.peak_since_reset - baseline >= self.config.new_cycle_min_rise
+        )
+        self.state.reset_new_cycle_confirmed = self.state.reset_growth_hits >= 3 and peak_confirmed
+        if seconds_since_reset is None or seconds_since_reset < self.config.min_reset_interval_seconds:
+            self.state.reset_unlock_reason = "LOCKED: waiting for 120s"
+            return
+
+        self.state.reset_unlock_reason = "LOCKED: 120s passed, waiting for confirmed new high cycle"
+        if self.state.reset_new_cycle_confirmed:
+            self.state.reset_episode_locked = False
+            self.state.reset_unlock_reason = "UNLOCKED: confirmed new high cycle after previous reset"
+            self.state.reset_candidate_hits = 0
+            self.state.reset_candidate_value = None
+            self.state.reset_episode_token += 1
+            self._save_reset_diagnostics(now, "episode_unlocked")
+            self._save_persisted_state()
+
+    def _paddle_control_reasons(self, rapid: EngineReading) -> tuple[str, ...]:
+        value = rapid.value
+        if value is None:
+            return ()
+        reasons: list[str] = []
+        previous = self.state.last_confirmed_prize
+        if self.is_target_value(value):
+            reasons.append("click_range")
+        if self.state.reset_candidate_hits > 0:
+            reasons.append("potential_reset")
+        if previous is not None:
+            if value < previous:
+                reasons.append("backward_or_reset")
+            elif value - previous > self.config.realistic_growth_slack:
+                reasons.append("suspicious_growth")
+        return tuple(dict.fromkeys(reasons))
+
+    def _capture_context(
+        self,
+        now: datetime,
+    ) -> tuple[Image.Image, RecognitionResult, AnchorStatus, PrefilterResult, float, float, float | None, bool]:
+        import time
+
+        started_capture = time.perf_counter()
+        screen = save_screen(self.adb, self.config.screenshot_path, backend=self.config.capture_backend, save=False)
+        capture_ms = (time.perf_counter() - started_capture) * 1000.0
+
+        prize_crop = crop_rect(screen, self.config.prize_crop)
+        capture_id = now.astimezone(self._local_zone()).strftime("%Y%m%d_%H%M%S_%f")
+        self._latest_screen = screen.copy()
+        self._latest_prize_crop = prize_crop.copy()
+        self.recent_prize_crops.append(prize_crop.copy())
+        self._latest_capture_completed_at = self._now()
+        anchors = analyze_anchors(screen, self.config, None)
+        started_fast = time.perf_counter()
+        prefilter = prefilter_range(
+            prize_crop,
+            self.config.digit_template_manifest_path,
+            self.config.fast_prefilter_confidence_threshold,
+            previous_reliable_value=self.state.last_confirmed_prize,
+            reset_min_trusted_value=self.config.reset_min_trusted_value,
+            max_components=self.config.fast_prefilter_max_components,
+        )
+        fast_template = recognize_digits_from_templates(
+            prize_crop,
+            self.config.digit_template_manifest_path,
+            self.config.fast_ocr_confidence_threshold,
+        )
+        fast_ms = (time.perf_counter() - started_fast) * 1000.0
+
+        started_ocr = time.perf_counter()
+        production_result = self._ocr_pipeline.process(
+            prize_crop,
+            capture_id,
+            control_policy=self._paddle_control_reasons,
+            recovery_allowed=anchors.button_visible,
+        )
+        authoritative_ocr_ms = (time.perf_counter() - started_ocr) * 1000.0
+        authoritative_ocr_ran = production_result.rapid is not None
+        self._last_production_ocr = production_result
+        self.state.last_full_ocr_at = now if authoritative_ocr_ran else self.state.last_full_ocr_at
+        self.state.notification_veto = (
+            production_result.notification.veto
+            and not production_result.recovered_after_notification
+        )
+        self.state.notification_heavy = production_result.notification.heavy
+        self.state.notification_recovery_hits = max(
+            0,
+            min(2, production_result.notification.clear_streak - 1),
+        )
+        current = production_result.current
+        rapid = production_result.rapid
+        paddle = production_result.paddle
+        if current is None:
+            recognition = RecognitionResult(
+                raw_text="",
+                normalized_text="",
+                value=None,
+                variant_name=production_result.notification.stage,
+                confidence=0.0,
+                method=("notification_veto" if self.state.notification_veto else "rapid_paddle_disagreement"),
+                fallback_used=False,
+                fast_reason=production_result.reason,
+            )
+        else:
+            control_detail = ""
+            if paddle is not None:
+                control_detail = (
+                    f"; paddle={paddle.value} confidence={paddle.confidence:.6f} "
+                    f"reasons={','.join(production_result.control_reasons)}"
+                )
+            recognition = RecognitionResult(
+                raw_text=current.text,
+                normalized_text=current.text,
+                value=current.value,
+                variant_name="full_clean_digit_roi",
+                confidence=current.confidence,
+                method=current.engine,
+                fallback_used=False,
+                fast_reason=(
+                    f"{production_result.reason}; rapid_ms={rapid.latency_ms if rapid else 0.0:.3f}"
+                    f"{control_detail}; prefilter_diagnostic={prefilter.reason}; template={fast_template.reason}"
+                ),
+            )
+        self.state.last_prefilter_digit_count = prefilter.digit_count
+        self.state.last_prefilter_first_digit = prefilter.first_digit
+        return screen, recognition, anchors, prefilter, capture_ms, fast_ms, authoritative_ocr_ms, authoritative_ocr_ran
+
+    def _determine_ocr_status(self, recognition: RecognitionResult, anchors: AnchorStatus) -> OcrStatus:
+        if recognition.method == "notification_veto":
+            return OcrStatus.OBSCURED
+        if recognition.value is not None:
+            return OcrStatus.VISIBLE
+        if recognition.method == "windows_ocr_timeout":
+            return OcrStatus.TIMEOUT
+        if recognition.method == "prefilter_skip":
+            return OcrStatus.SKIPPED
+        return OcrStatus.ERROR
+
+    def _seconds_since_reset(self, now: datetime) -> int | None:
+        if not self.state.last_reset_at:
+            return None
+        return max(0, int((now - self.state.last_reset_at).total_seconds()))
+
+    def _reset_interval_remaining(self, now: datetime) -> int | None:
+        if not self.state.last_reset_at:
+            return None
+        elapsed = max(0, int((now - self.state.last_reset_at).total_seconds()))
+        return max(0, self.config.min_reset_interval_seconds - elapsed)
+
+    def _reset_interval_elapsed(self, now: datetime) -> bool:
+        remaining = self._reset_interval_remaining(now)
+        return remaining is None or remaining == 0
+
+    def _cooldown_remaining(self, now: datetime) -> int | None:
+        if not self.state.cooldown_until:
+            return None
+        remaining = int((self.state.cooldown_until - now).total_seconds())
+        return max(0, remaining)
+
+    def _can_start_clicking(self, value: int, anchors: AnchorStatus, now: datetime) -> bool:
+        if not self.tap_decisions_enabled:
+            return False
+        if not self.is_target_value(value):
+            return False
+        if self.state.candidate_hits < self.config.stable_reads_required:
+            return False
+        if not anchors.event_screen_ok or not anchors.button_visible:
+            return False
+        if self.state.real_mode_armed and self.state.manual_reset_block_real_taps:
+            return False
+        if not self.state.reset_time_known:
+            return False
+        if self.state.cooldown_until and self.state.cooldown_until > now:
+            return False
+        return True
+
+    def _anchors_allow_progress(self, anchors: AnchorStatus) -> bool:
+        return anchors.event_screen_ok and anchors.button_visible
+
+    def _reset_progress_due_to_anchors(self, phase_to_waiting: bool = True) -> None:
+        self.state.candidate_value = None
+        self.state.candidate_hits = 0
+        self.state.next_click_at = None
+        self.state.checking_until = None
+        self.state.burst_taps_done = 0
+        if phase_to_waiting and self.state.phase not in {MonitorPhase.RESET_COOLDOWN, MonitorPhase.RESET_TIME_UNKNOWN}:
+            self.state.phase = MonitorPhase.WAITING
+        self.state.last_status = "Якоря не подтверждены: screen_ok/button_ok обязательны, клики запрещены"
+
+    def _update_unknown_and_cooldown(self, now: datetime) -> None:
+        if not self.state.reset_time_known:
+            if self.state.unknown_since is None:
+                self.state.unknown_since = now
+            observed = (now - self.state.unknown_since).total_seconds()
+            if observed >= self.config.reset_cooldown_seconds and not self.state.manual_reset_block_real_taps:
+                self.state.reset_time_known = True
+                if self.state.phase == MonitorPhase.RESET_TIME_UNKNOWN:
+                    self.state.phase = MonitorPhase.WAITING
+                    self.state.last_status = "RESET_TIME_UNKNOWN завершён: можно наблюдать обычный цикл"
+                self._save_persisted_state()
+
+        if self.state.cooldown_until and now >= self.state.cooldown_until:
+            self.state.cooldown_until = None
+            if self.state.phase == MonitorPhase.RESET_COOLDOWN:
+                self.state.phase = MonitorPhase.WAITING
+                self.state.last_status = "RESET_COOLDOWN завершён"
+            self._save_persisted_state()
+
+    def _update_candidate(self, value: int) -> None:
+        in_range = self.is_target_value(value)
+        if not in_range:
+            self.state.candidate_value = None
+            self.state.candidate_hits = 0
+            if self.state.phase not in {MonitorPhase.RESET_COOLDOWN, MonitorPhase.RESET_TIME_UNKNOWN}:
+                self.state.phase = MonitorPhase.WAITING
+            self.state.last_status = f"Найдено значение: {value}"
+            return
+
+        if self.state.candidate_hits == 0:
+            self.state.candidate_value = value
+            self.state.candidate_hits = 1
+            self.state.phase = MonitorPhase.CANDIDATE
+            self.state.last_status = f"CANDIDATE: первое подтверждение {value}"
+            return
+
+        same_value = value == self.state.candidate_value
+        fallback_ok = self.config.allow_in_range_fallback and in_range
+        if same_value or fallback_ok:
+            self.state.candidate_hits += 1
+            self.state.phase = MonitorPhase.CONFIRMED
+            self.state.last_status = (
+                f"CONFIRMED: подтверждений {self.state.candidate_hits}/{self.config.stable_reads_required}"
+            )
+            return
+
+        self.state.candidate_value = value
+        self.state.candidate_hits = 1
+        self.state.phase = MonitorPhase.CANDIDATE
+        self.state.last_status = f"CANDIDATE: перезапуск подтверждения на {value}"
+
+    def _update_reset_detection(
+        self,
+        value: int | None,
+        ocr_status: OcrStatus,
+        now: datetime,
+        previous_trusted_at: datetime | None,
+        recognition: RecognitionResult,
+        anchors: AnchorStatus,
+        prefilter: PrefilterResult,
+    ) -> None:
+        previous_high_value = self.state.last_confirmed_prize
+        previous_high_at = previous_trusted_at or self.state.last_trusted_at
+        if (
+            value is None
+            or ocr_status != OcrStatus.VISIBLE
+        ):
+            return
+        if previous_high_value is None:
+            self.state.last_confirmed_prize = value
+            self.state.last_trusted_at = now
+            return
+
+        if self.state.reset_episode_locked:
+            self.state.last_confirmed_prize = value
+            self.state.last_trusted_at = now
+            return
+
+        if (
+            self.state.reset_candidate_hits > 0
+            and self.state.reset_first_low_at is not None
+            and (now - self.state.reset_first_low_at).total_seconds()
+            > self.config.reset_candidate_timeout_seconds
+        ):
+            self.state.reset_candidate_hits = 0
+            self.state.reset_candidate_value = None
+            self.state.reset_last_high_at = None
+            self.state.reset_first_low_at = None
+            self.state.reset_first_low_value = None
+            self.state.last_status = "Reset candidate timed out"
+
+        if not self._reset_interval_elapsed(now):
+            self.state.reset_candidate_hits = 0
+            self.state.reset_candidate_value = None
+            self.state.reset_last_high_at = None
+            self.state.reset_first_low_at = None
+            self.state.reset_first_low_value = None
+            self.state.last_confirmed_prize = value
+            self.state.last_trusted_at = now
+            if self._looks_like_reset_transition(self.state.peak_since_reset or previous_high_value, value):
+                self.state.last_status = (
+                    f"Reset blocked by min interval: осталось "
+                    f"{self._reset_interval_remaining(now)}с"
+                )
+                self._save_reset_diagnostics(now, "blocked_min_interval", recognition, anchors, prefilter)
+            return
+
+        reference_peak = self.state.peak_since_reset or previous_high_value
+        if previous_high_value > reference_peak:
+            reference_peak = previous_high_value
+
+        starts_reset = self._looks_like_reset_transition(reference_peak, value)
+        confirms_reset = self._is_reset_confirmation_frame(value)
+        if self.state.reset_candidate_hits == 0 and not starts_reset:
+            self.state.reset_candidate_hits = 0
+            self.state.reset_candidate_value = None
+            self.state.reset_last_high_at = None
+            self.state.reset_first_low_at = None
+            self.state.reset_first_low_value = None
+            self.state.last_confirmed_prize = value
+            self.state.last_trusted_at = now
+            return
+
+        if self.state.reset_candidate_hits == 0:
+            self.state.reset_candidate_value = value
+            self.state.reset_candidate_hits = 1
+            self.state.reset_last_high_at = previous_high_at
+            self.state.reset_first_low_at = now
+            self.state.reset_first_low_value = value
+            self._save_reset_diagnostics(now, "potential", recognition, anchors, prefilter)
+        else:
+            if not confirms_reset:
+                self.state.reset_candidate_hits = 0
+                self.state.reset_candidate_value = None
+                self.state.reset_last_high_at = None
+                self.state.reset_first_low_at = None
+                self.state.reset_first_low_value = None
+                self.state.last_confirmed_prize = value
+                self.state.last_trusted_at = now
+                self.state.last_status = "False reset candidate canceled"
+                return
+            self.state.reset_candidate_value = value
+            self.state.reset_candidate_hits += 1
+            if self.state.reset_first_low_at is None:
+                self.state.reset_first_low_at = now
+            if self.state.reset_first_low_value is None:
+                self.state.reset_first_low_value = value
+
+        if self.state.reset_candidate_hits >= self.config.reset_confirm_reads_required:
+            reset_event_at = self.state.reset_first_low_at or now
+            reset_confirmed_at = now
+            self.state.last_reset_at = reset_event_at
+            self.state.last_reset_confirmed_at = reset_confirmed_at
+            self.state.cooldown_until = reset_event_at + timedelta(seconds=self.config.reset_cooldown_seconds)
+            self.state.reset_time_known = True
+            self.state.manual_reset_block_real_taps = False
+            self.state.phase = MonitorPhase.RESET_COOLDOWN
+            self.state.candidate_value = None
+            self.state.candidate_hits = 0
+            self.state.reset_candidate_hits = 0
+            self.state.reset_candidate_value = None
+            self.state.burst_taps_done = 0
+            self.state.next_click_at = None
+            self.state.checking_until = None
+            self._append_reset_history(
+                reference_peak,
+                value,
+                reset_event_at,
+                reset_confirmed_at,
+                self.state.reset_last_high_at,
+                self.state.reset_first_low_at,
+            )
+            self.state.last_confirmed_prize = value
+            self.state.last_trusted_at = reset_event_at
+            self.state.peak_since_reset = value
+            self.state.post_reset_baseline = self.state.reset_first_low_value or value
+            self.state.reset_episode_locked = True
+            self.state.reset_growth_hits = 0
+            self.state.reset_growth_last_value = value
+            self.state.reset_growth_last_capture_id = None
+            self.state.reset_growth_last_at = None
+            self.state.reset_new_cycle_confirmed = False
+            self.state.reset_unlock_reason = "LOCKED: waiting for 120s"
+            self.state.last_status = (
+                f"confirmed reset; delay={max(0.0, (reset_confirmed_at - reset_event_at).total_seconds()):.3f}s"
+            )
+            self._save_reset_diagnostics(
+                now,
+                "confirmed",
+                recognition,
+                anchors,
+                prefilter,
+                reset_event_at=reset_event_at,
+                reset_confirmed_at=reset_confirmed_at,
+            )
+            self.state.reset_last_high_at = None
+            self.state.reset_first_low_at = None
+            self.state.reset_first_low_value = None
+            self._save_persisted_state()
+
+    def _save_trigger_diagnostics(
+        self,
+        screen: Image.Image,
+        prize_result: RecognitionResult,
+        anchors: AnchorStatus,
+    ) -> Path:
+        stamp = self._now().strftime("%Y%m%d_%H%M%S_%f")
+        target_dir = self.config.trigger_dir / stamp
+        target_dir.mkdir(parents=True, exist_ok=True)
+        screen.save(target_dir / "screen.png")
+        crop_rect(screen, self.config.prize_crop).save(target_dir / "prize_crop.png")
+        anchors.button_crop.save(target_dir / "button_crop.png")
+        crop_rect(screen, self.config.event_title_crop).save(target_dir / "title_crop.png")
+        screen.save(target_dir / "pre_tap_screen.png")
+        (target_dir / "decision.txt").write_text(
+            "\n".join(
+                [
+                    f"value={prize_result.value}",
+                    f"raw={prize_result.normalized_text}",
+                    f"variant={prize_result.variant_name}",
+                    f"title_score={anchors.title_score:.3f}",
+                    f"screen_anchor_score={anchors.screen_anchor_score:.3f}",
+                    f"button_score={anchors.button_score:.3f}",
+                    f"gold_ratio={anchors.gold_ratio:.3f}",
+                    f"title_text={anchors.title_text}",
+                    f"button_text={anchors.button_text}",
+                    f"phase={self.state.phase.value}",
+                    f"test_mode={self.state.test_mode}",
+                    f"real_mode_armed={self.state.real_mode_armed}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return target_dir
+
+    def _handle_active_clicking(
+        self,
+        now: datetime,
+        screen: Image.Image,
+        recognition: RecognitionResult,
+        anchors: AnchorStatus,
+        tap_events: list[str],
+    ) -> tuple[bool, bool, Path | None]:
+        clicked = False
+        would_tap = False
+        diagnostics_dir: Path | None = None
+
+        if self.state.next_click_at is None:
+            self.state.next_click_at = now
+
+        if now < self.state.next_click_at:
+            return clicked, would_tap, diagnostics_dir
+        if self.state.notification_veto or self.state.ocr_status == OcrStatus.OBSCURED:
+            self.state.phase = MonitorPhase.CHECKING_AFTER_BURST
+            self.state.next_click_at = None
+            self.state.checking_until = None
+            self.state.last_status = "CHECKING_AFTER_BURST: notification veto, tap series stopped"
+            return clicked, would_tap, diagnostics_dir
+        if not anchors.event_screen_ok or not anchors.button_visible:
+            self._reset_progress_due_to_anchors()
+            self.state.last_status = "ACTIVE_CLICKING stopped: safety anchors are not valid"
+            return clicked, would_tap, diagnostics_dir
+
+        actual_now = self._now()
+        frame_age = (
+            (actual_now - self._latest_capture_completed_at).total_seconds()
+            if self._latest_capture_completed_at is not None
+            else float("inf")
+        )
+        if frame_age > self.config.safety_frame_max_age_seconds:
+            self.state.phase = MonitorPhase.CHECKING_AFTER_BURST
+            self.state.next_click_at = None
+            self.state.checking_until = None
+            self.state.last_status = f"Tap blocked: safety frame is {frame_age:.3f}s old"
+            return clicked, would_tap, diagnostics_dir
+        if (
+            self.state.last_tap_sent_at is not None
+            and (actual_now - self.state.last_tap_sent_at).total_seconds() < self.config.click_interval_seconds
+        ):
+            self.state.next_click_at = self.state.last_tap_sent_at + timedelta(
+                seconds=self.config.click_interval_seconds
+            )
+            return clicked, would_tap, diagnostics_dir
+
+        diagnostics_dir = self._save_trigger_diagnostics(screen, recognition, anchors)
+        if self.state.real_mode_armed:
+            self.adb.tap_persistent(self.config.tap_point.x, self.config.tap_point.y)
+            clicked = True
+            tap_events.append(f"{actual_now.strftime('%H:%M:%S.%f')[:-3]} REAL adb tap")
+        else:
+            would_tap = True
+            tap_events.append(f"{actual_now.strftime('%H:%M:%S.%f')[:-3]} virtual tap")
+        self.state.last_tap_sent_at = actual_now
+        self.state.burst_taps_done += 1
+        self.state.total_taps += 1
+        self.state.next_click_at = actual_now + timedelta(seconds=self.config.click_interval_seconds)
+        self.state.last_status = (
+            f"ACTIVE_CLICKING: tap {self.state.burst_taps_done}/{self.config.burst_size}, "
+            f"total {self.state.total_taps}"
+        )
+        if self.state.burst_taps_done >= self.config.burst_size:
+            self.state.phase = MonitorPhase.CHECKING_AFTER_BURST
+            self.state.checking_until = actual_now + timedelta(seconds=self.config.provisional_check_pause_seconds)
+            self.state.last_status = "CHECKING_AFTER_BURST: waiting for clean frames after burst"
+
+        return clicked, would_tap, diagnostics_dir
+
+    def _format_reset_time(self) -> str:
+        if not self.state.last_reset_at:
+            return "—"
+        return self.state.last_reset_at.strftime("%H:%M:%S")
+
+    def _format_reset_confirmed_time(self) -> str:
+        if not self.state.last_reset_confirmed_at:
+            return "�"
+        return self.state.last_reset_confirmed_at.strftime("%H:%M:%S")
+
+    def poll_once(self) -> PollSnapshot:
+        now = self._now()
+        capture_id = now.astimezone(self._local_zone()).strftime("%Y%m%d_%H%M%S_%f")
+        timestamp = self.timestamp()
+        clicked = False
+        would_tap = False
+        diagnostics_dir: Path | None = None
+        tap_events: list[str] = []
+        reset_average_label, reset_min_label, reset_max_label = self._history_stats()
+
+        self._update_unknown_and_cooldown(now)
+
+        previous_trusted_at = self.state.last_trusted_at
+        screen, recognition, anchors, prefilter, capture_ms, fast_observation_ms, authoritative_ocr_ms, authoritative_ocr_ran = self._capture_context(now)
+        prize_crop = crop_rect(screen, self.config.prize_crop)
+        self.state.ocr_status = self._determine_ocr_status(recognition, anchors)
+        self.state.raw_ocr_value = recognition.value
+        trusted_value, trust_reason = (
+            self._resolve_trusted_value(recognition.value, now)
+            if self.state.ocr_status == OcrStatus.VISIBLE
+            else (None, "OCR not visible")
+        )
+        self.state.trusted_value = trusted_value
+        if trusted_value is not None:
+            self.state.last_value = trusted_value
+        self.state.last_trust_reason = trust_reason
+        in_range = trusted_value is not None and self.is_target_value(trusted_value)
+        anchors_ok = self._anchors_allow_progress(anchors)
+        self._append_observation(now, recognition, anchors, prefilter)
+
+        if (
+            self.state.phase not in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}
+            and self.state.ocr_status == OcrStatus.VISIBLE
+            and trusted_value is not None
+        ):
+            self._update_peak_tracking(trusted_value, recognition)
+            self._update_reset_episode_lock(trusted_value, now, capture_id)
+            self._update_reset_detection(
+                trusted_value,
+                self.state.ocr_status,
+                now,
+                previous_trusted_at=previous_trusted_at,
+                recognition=recognition,
+                anchors=anchors,
+                prefilter=prefilter,
+            )
+
+        if (
+            self.state.phase not in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}
+            and self.state.ocr_status == OcrStatus.VISIBLE
+            and recognition.value is not None
+            and trusted_value is None
+        ):
+            diagnostics_dir = self._save_outlier_diagnostics(screen, prize_crop, recognition, now, trust_reason)
+
+        if not anchors_ok and self.state.phase in {
+            MonitorPhase.WAITING,
+            MonitorPhase.CANDIDATE,
+            MonitorPhase.CONFIRMED,
+            MonitorPhase.ACTIVE_CLICKING,
+            MonitorPhase.CHECKING_AFTER_BURST,
+        }:
+            self._reset_progress_due_to_anchors()
+
+        if self.state.notification_veto and self.state.phase in {
+            MonitorPhase.WAITING,
+            MonitorPhase.CANDIDATE,
+            MonitorPhase.CONFIRMED,
+        }:
+            self.state.candidate_value = None
+            self.state.candidate_hits = 0
+            self.state.phase = MonitorPhase.WAITING
+
+        if self.state.phase == MonitorPhase.CHECKING_AFTER_BURST:
+            if self.state.phase == MonitorPhase.RESET_COOLDOWN:
+                pass
+            elif not anchors_ok:
+                self.state.last_status = "Якоря потеряны во время CHECKING_AFTER_BURST: возобновление кликов запрещено"
+            elif self.state.checking_until and now < self.state.checking_until:
+                self.state.last_status = "CHECKING_AFTER_BURST: пауза перед OCR-проверкой"
+            elif self.state.ocr_status == OcrStatus.OBSCURED:
+                self.state.last_status = "CHECKING_AFTER_BURST: число ещё закрыто уведомлением"
+            elif self.state.ocr_status == OcrStatus.TIMEOUT:
+                self.state.last_status = "CHECKING_AFTER_BURST: Windows OCR timeout, ждём следующий кадр"
+            else:
+                self.state.burst_taps_done = 0
+                self.state.next_click_at = None
+                self.state.checking_until = None
+                self.state.phase = MonitorPhase.WAITING
+                self.state.last_status = "CHECKING_AFTER_BURST завершён"
+
+        elif self.state.phase == MonitorPhase.ACTIVE_CLICKING:
+            if not anchors_ok:
+                self._reset_progress_due_to_anchors()
+            else:
+                clicked, would_tap, diagnostics_dir = self._handle_active_clicking(now, screen, recognition, anchors, tap_events)
+
+        elif self.state.phase == MonitorPhase.RESET_COOLDOWN:
+            self.state.last_status = "RESET_COOLDOWN: клики запрещены"
+
+        elif self.state.phase == MonitorPhase.RESET_TIME_UNKNOWN:
+            if self.state.manual_reset_block_real_taps:
+                self.state.last_status = "RESET_TIME_UNKNOWN: после ручного сброса ждём новое достоверное обнуление"
+            else:
+                self.state.last_status = "RESET_TIME_UNKNOWN: ждём 120 секунд безопасного наблюдения"
+
+        elif self.state.phase in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}:
+            pass
+
+        else:
+            if not anchors_ok:
+                self._reset_progress_due_to_anchors()
+            elif self.state.ocr_status == OcrStatus.VISIBLE and trusted_value is not None:
+                if self.state.phase != MonitorPhase.RESET_COOLDOWN:
+                    self._update_candidate(trusted_value)
+                    if self._can_start_clicking(trusted_value, anchors, now):
+                        self.state.phase = MonitorPhase.ACTIVE_CLICKING
+                        self.state.burst_taps_done = 0
+                        self.state.next_click_at = now
+                        self.state.last_status = "ACTIVE_CLICKING: старт тестовой серии"
+                        clicked, would_tap, diagnostics_dir = self._handle_active_clicking(
+                            now,
+                            screen,
+                            recognition,
+                            anchors,
+                            tap_events,
+                        )
+            elif self.state.ocr_status == OcrStatus.VISIBLE and recognition.value is not None:
+                self.state.candidate_value = None
+                self.state.candidate_hits = 0
+                self.state.last_status = f"OCR outlier rejected: {trust_reason}"
+            elif self.state.ocr_status == OcrStatus.OBSCURED:
+                self.state.last_status = "Фонд временно закрыт уведомлением. Ожидание чистого кадра."
+            elif self.state.ocr_status == OcrStatus.TIMEOUT:
+                self.state.candidate_value = None
+                self.state.candidate_hits = 0
+                self.state.last_status = "Windows OCR timeout"
+            else:
+                self.state.candidate_value = None
+                self.state.candidate_hits = 0
+                self.state.last_status = "Ошибка распознавания"
+
+        if self.state.ocr_status == OcrStatus.SKIPPED and self.state.phase in {MonitorPhase.WAITING, MonitorPhase.CANDIDATE, MonitorPhase.CONFIRMED}:
+            self.state.candidate_value = None
+            self.state.candidate_hits = 0
+            self.state.last_status = f"Prefilter: {prefilter.status} ({prefilter.reason})"
+
+        if (
+            self.state.ocr_status == OcrStatus.OBSCURED
+            and self.state.phase not in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}
+        ):
+            self.state.last_status = "Фонд временно закрыт уведомлением. Ожидание чистого кадра."
+        elif (
+            recognition.method == "rapid_paddle_disagreement"
+            and self.state.phase not in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}
+        ):
+            self.state.last_status = "RapidOCR и PaddleOCR расходятся. Ожидание следующего чистого кадра."
+
+        self._save_persisted_state()
+
+        return PollSnapshot(
+            timestamp=timestamp,
+            value=self.state.last_value,
+            raw_value=recognition.value,
+            trusted_value=trusted_value,
+            status=self.state.last_status,
+            phase=self.state.phase,
+            ocr_status=self.state.ocr_status,
+            confirmation_hits=self.state.candidate_hits,
+            in_range=in_range,
+            event_screen_ok=anchors.event_screen_ok,
+            button_visible=anchors.button_visible,
+            title_score=anchors.title_score,
+            screen_anchor_score=anchors.screen_anchor_score,
+            button_score=anchors.button_score,
+            button_gold_ratio=anchors.gold_ratio,
+            title_text=anchors.title_text,
+            button_text=anchors.button_text,
+            prefilter_status=prefilter.status,
+            prefilter_confidence=prefilter.confidence,
+            prefilter_digit_count=prefilter.digit_count,
+            prefilter_first_digit=prefilter.first_digit,
+            recognition=recognition,
+            clicked=clicked,
+            would_tap=would_tap,
+            diagnostics_dir=str(diagnostics_dir) if diagnostics_dir else None,
+            last_reset_at=self._format_reset_time(),
+            last_reset_confirmed_at=self._format_reset_confirmed_time(),
+            seconds_since_reset=self._seconds_since_reset(now),
+            cooldown_remaining=self._cooldown_remaining(now),
+            active_burst_taps=self.state.burst_taps_done,
+            total_taps=self.state.total_taps,
+            reset_history_rows=self._history_rows(),
+            reset_average_label=reset_average_label,
+            reset_min_label=reset_min_label,
+            reset_max_label=reset_max_label,
+            reset_since_history_label=self._history_since_reset_label(now),
+            since_reset_label=self._format_since_reset_label(now),
+            cooldown_label=(
+                self._format_duration(self._cooldown_remaining(now))
+                if self._cooldown_remaining(now) is not None
+                else "—"
+            ),
+            mode_banner=self.mode_banner(),
+            target_range_label=self.target_range_label(),
+            editable_test_range_label=self.editable_test_range_label(),
+            real_taps_label=self.real_taps_label(),
+            tap_events=tap_events,
+            capture_ms=capture_ms,
+            fast_observation_ms=fast_observation_ms,
+            authoritative_ocr_ms=authoritative_ocr_ms,
+            authoritative_ocr_ran=authoritative_ocr_ran,
+            notification_veto=self.state.notification_veto,
+            notification_heavy=self.state.notification_heavy,
+            notification_recovery_hits=self.state.notification_recovery_hits,
+            paddle_control_ran=(
+                self._last_production_ocr is not None
+                and self._last_production_ocr.paddle is not None
+            ),
+        )
+
+    @staticmethod
+    def timestamp() -> str:
+        return datetime.now().strftime("%H:%M:%S")
+
+    def close(self) -> None:
+        self.adb.close_shell()

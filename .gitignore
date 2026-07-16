@@ -1,0 +1,39 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.model_cache/
+
+# Local application state and diagnostics
+runtime/
+*.log
+*.jsonl
+*.zip
+*.bak
+backups/
+
+# Local configuration and editor files
+.env
+.env.*
+config.local.*
+.idea/
+.vscode/
+
+# Dependencies are installed into .venv by the installer
+vendor/
+
+# Development-only diagnostics and local screenshots
+tools/
+memu_screen.png
+*contact_sheet*.png
+*screenshot*.png
+
+# Dataset-building metadata and superseded digit crops
+assets/templates/digits/dataset_rows.json
+assets/templates/digits/*.png
+
+# Temporary fresh-clone verification folders
+fresh_clone_test/

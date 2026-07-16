@@ -1,0 +1,6 @@
+numpy==2.3.5
+onnxruntime==1.27.0
+Pillow==12.3.0
+paddlex[ocr-core]==3.7.2
+paddleocr==3.7.0
+rapidocr==3.9.1
