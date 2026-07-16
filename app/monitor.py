@@ -1372,6 +1372,7 @@ class PrizeMonitor:
         now: datetime,
         screen: Image.Image,
         recognition: RecognitionResult,
+        trusted_value: int | None,
         anchors: AnchorStatus,
         tap_events: list[str],
     ) -> tuple[bool, bool, Path | None]:
@@ -1379,10 +1380,7 @@ class PrizeMonitor:
         would_tap = False
         diagnostics_dir: Path | None = None
 
-        if self.state.next_click_at is None:
-            self.state.next_click_at = now
-
-        if now < self.state.next_click_at:
+        if self.state.phase != MonitorPhase.ACTIVE_CLICKING:
             return clicked, would_tap, diagnostics_dir
         if self.state.notification_veto or self.state.ocr_status == OcrStatus.OBSCURED:
             self.state.phase = MonitorPhase.CHECKING_AFTER_BURST
@@ -1390,9 +1388,59 @@ class PrizeMonitor:
             self.state.checking_until = None
             self.state.last_status = "CHECKING_AFTER_BURST: notification veto, tap series stopped"
             return clicked, would_tap, diagnostics_dir
+        if self.state.ocr_status != OcrStatus.VISIBLE or trusted_value is None:
+            self._clear_candidate()
+            self.state.next_click_at = None
+            self.state.checking_until = None
+            self.state.burst_taps_done = 0
+            self.state.phase = MonitorPhase.WAITING
+            self.state.last_status = "ACTIVE_CLICKING stopped: current trusted value is unavailable"
+            return clicked, would_tap, diagnostics_dir
+        if not self.is_target_value(trusted_value):
+            self._clear_candidate()
+            self.state.next_click_at = None
+            self.state.checking_until = None
+            self.state.burst_taps_done = 0
+            self.state.phase = MonitorPhase.WAITING
+            self.state.last_status = (
+                f"ACTIVE_CLICKING stopped: current value {trusted_value} is outside target range"
+            )
+            return clicked, would_tap, diagnostics_dir
         if not anchors.event_screen_ok or not anchors.button_visible:
             self._reset_progress_due_to_anchors()
             self.state.last_status = "ACTIVE_CLICKING stopped: safety anchors are not valid"
+            return clicked, would_tap, diagnostics_dir
+        if not self.tap_decisions_enabled:
+            self._clear_candidate()
+            self.state.next_click_at = None
+            self.state.checking_until = None
+            self.state.burst_taps_done = 0
+            self.state.phase = MonitorPhase.WAITING
+            self.state.last_status = "ACTIVE_CLICKING stopped: tap decisions are disabled"
+            return clicked, would_tap, diagnostics_dir
+        if not self.state.reset_time_known:
+            self._clear_candidate()
+            self.state.next_click_at = None
+            self.state.checking_until = None
+            self.state.burst_taps_done = 0
+            self.state.phase = MonitorPhase.RESET_TIME_UNKNOWN
+            self.state.last_status = "ACTIVE_CLICKING stopped: reset time is unknown"
+            return clicked, would_tap, diagnostics_dir
+        if self.state.cooldown_until and self.state.cooldown_until > now:
+            self._clear_candidate()
+            self.state.next_click_at = None
+            self.state.checking_until = None
+            self.state.burst_taps_done = 0
+            self.state.phase = MonitorPhase.RESET_COOLDOWN
+            self.state.last_status = "ACTIVE_CLICKING stopped: reset cooldown is active"
+            return clicked, would_tap, diagnostics_dir
+        if self.state.real_mode_armed and self.state.manual_reset_block_real_taps:
+            self._clear_candidate()
+            self.state.next_click_at = None
+            self.state.checking_until = None
+            self.state.burst_taps_done = 0
+            self.state.phase = MonitorPhase.RESET_TIME_UNKNOWN
+            self.state.last_status = "ACTIVE_CLICKING stopped: real taps are blocked after manual reset"
             return clicked, would_tap, diagnostics_dir
 
         actual_now = self._now()
@@ -1406,6 +1454,11 @@ class PrizeMonitor:
             self.state.next_click_at = None
             self.state.checking_until = None
             self.state.last_status = f"Tap blocked: safety frame is {frame_age:.3f}s old"
+            return clicked, would_tap, diagnostics_dir
+
+        if self.state.next_click_at is None:
+            self.state.next_click_at = now
+        if now < self.state.next_click_at:
             return clicked, would_tap, diagnostics_dir
         if (
             self.state.last_tap_sent_at is not None
@@ -1553,7 +1606,9 @@ class PrizeMonitor:
             if not anchors_ok:
                 self._reset_progress_due_to_anchors()
             else:
-                clicked, would_tap, diagnostics_dir = self._handle_active_clicking(now, screen, recognition, anchors, tap_events)
+                clicked, would_tap, diagnostics_dir = self._handle_active_clicking(
+                    now, screen, recognition, trusted_value, anchors, tap_events
+                )
 
         elif self.state.phase == MonitorPhase.RESET_COOLDOWN:
             self.state.last_status = "RESET_COOLDOWN: клики запрещены"
@@ -1582,6 +1637,7 @@ class PrizeMonitor:
                             now,
                             screen,
                             recognition,
+                            trusted_value,
                             anchors,
                             tap_events,
                         )
