@@ -73,7 +73,7 @@ class AppConfig:
     digit_template_dir: Path = Path("assets") / "templates" / "digits"
     digit_template_manifest_path: Path = Path("assets") / "templates" / "digits" / "manifest.json"
     fast_ocr_enabled: bool = False
-    fast_prefilter_enabled: bool = True
+    fast_prefilter_enabled: bool = False
     title_template_path: Path = Path("assets") / "templates" / "event_title.png"
     screen_anchor_template_path: Path = Path("assets") / "templates" / "screen_anchor.png"
     button_template_path: Path = Path("assets") / "templates" / "wish_button.png"
