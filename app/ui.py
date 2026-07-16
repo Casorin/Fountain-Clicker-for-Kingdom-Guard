@@ -106,6 +106,97 @@ def _start_or_focus_existing_instance(config: AppConfig, manager: SingleInstance
     return None
 
 
+class LogPanel(ttk.LabelFrame):
+    def __init__(self, parent: tk.Misc) -> None:
+        super().__init__(parent, text="Логи", padding=8)
+        self.follow_logs = True
+        self._inserting = False
+
+        toolbar = ttk.Frame(self)
+        toolbar.pack(fill="x", pady=(0, 6))
+        ttk.Button(toolbar, text="К последним логам", command=self.go_to_latest).pack(side="left")
+        ttk.Button(toolbar, text="Копировать всё", command=self.copy_all).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Очистить отображение", command=self.clear_display).pack(side="left", padx=(6, 0))
+        self.new_entries_button = ttk.Button(
+            toolbar,
+            text="Есть новые записи ↓",
+            command=self.go_to_latest,
+        )
+
+        text_frame = ttk.Frame(self)
+        text_frame.pack(fill="both", expand=True)
+        self.text = tk.Text(
+            text_frame,
+            wrap="word",
+            state="disabled",
+            undo=False,
+            width=58,
+            height=20,
+        )
+        self.scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=self.text.yview)
+        self.text.configure(yscrollcommand=self._on_yview)
+        self.text.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+        self.text.bind("<MouseWheel>", self._on_user_scroll, add="+")
+        self.text.bind("<Button-4>", self._on_user_scroll, add="+")
+        self.text.bind("<Button-5>", self._on_user_scroll, add="+")
+        self.text.bind("<KeyRelease>", self._on_user_scroll, add="+")
+
+    def _on_yview(self, first: str, last: str) -> None:
+        self.scrollbar.set(first, last)
+        if self._inserting:
+            return
+        self._set_follow(float(last) >= 0.995)
+
+    def _on_user_scroll(self, _event: tk.Event | None = None) -> None:
+        self.after_idle(self._sync_follow_from_view)
+
+    def _sync_follow_from_view(self) -> None:
+        self._set_follow(self.text.yview()[1] >= 0.995)
+
+    def _set_follow(self, enabled: bool) -> None:
+        self.follow_logs = enabled
+        if enabled:
+            self.new_entries_button.pack_forget()
+        elif not self.new_entries_button.winfo_manager():
+            self.new_entries_button.pack(side="right")
+
+    def append(self, line: str) -> None:
+        at_bottom = self.follow_logs and self.text.yview()[1] >= 0.995
+        top_index = self.text.index("@0,0")
+        self._inserting = True
+        try:
+            self.text.configure(state="normal")
+            self.text.insert("end", line)
+            self.text.configure(state="disabled")
+            if at_bottom:
+                self.text.see("end")
+            else:
+                self.text.yview(top_index)
+        finally:
+            self._inserting = False
+        if at_bottom:
+            self._set_follow(True)
+        else:
+            self._set_follow(False)
+
+    def go_to_latest(self) -> None:
+        self.text.see("end")
+        self._set_follow(True)
+
+    def copy_all(self) -> None:
+        content = self.text.get("1.0", "end-1c")
+        self.clipboard_clear()
+        self.clipboard_append(content)
+        self.update_idletasks()
+
+    def clear_display(self) -> None:
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.configure(state="disabled")
+        self._set_follow(True)
+
+
 class AppWindow:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -124,6 +215,8 @@ class AppWindow:
         self._acceptance_poll_count = 0
         self._acceptance_control_images = 0
         self._acceptance_min_seconds = float(os.environ.get("KGPM_ACCEPTANCE_MIN_SECONDS", "600"))
+        self.logs_visible = False
+        self._closed_window_width = 1100
 
         self.root.title("Kingdom Guard Prize Monitor")
         self.root.geometry("1100x980")
@@ -154,6 +247,7 @@ class AppWindow:
         self.active_range_var = tk.StringVar(value=self.monitor.target_range_label())
         self.test_range_min_var = tk.StringVar(value=str(self.monitor.user_range.test_min_prize))
         self.test_range_max_var = tk.StringVar(value=str(self.monitor.user_range.test_max_prize))
+        self.log_toggle_var = tk.StringVar(value="Показать логи")
 
         self._build()
         self._bind_hotkeys()
@@ -162,8 +256,13 @@ class AppWindow:
         self._start_ocr_warmup()
 
     def _build(self) -> None:
-        frame = ttk.Frame(self.root, padding=12)
-        frame.pack(fill="both", expand=True)
+        self.paned = ttk.PanedWindow(self.root, orient="horizontal")
+        self.paned.pack(fill="both", expand=True)
+        frame = ttk.Frame(self.paned, padding=12)
+        self.main_frame = frame
+        self.paned.add(frame, weight=1)
+        self.log_panel = LogPanel(self.paned)
+        self.log = self.log_panel.text
 
         info = ttk.Frame(frame)
         info.pack(fill="x")
@@ -215,6 +314,12 @@ class AppWindow:
             variable=self.mode_var,
             command=self._sync_mode,
         ).pack(side="left", padx=16)
+        self.log_toggle_button = ttk.Button(
+            controls,
+            textvariable=self.log_toggle_var,
+            command=self.toggle_logs,
+        )
+        self.log_toggle_button.pack(side="right")
 
         range_frame = ttk.LabelFrame(frame, text="Настройка диапазона кликов", padding=8)
         range_frame.pack(fill="x", pady=(0, 10))
@@ -283,9 +388,6 @@ class AppWindow:
         )
         self.clear_history_button.pack(side="left", padx=(8, 0))
 
-        self.log = tk.Text(frame, height=6, state="disabled")
-        self.log.pack(fill="both", expand=True)
-
     def _bind_hotkeys(self) -> None:
         self.root.bind("<F8>", lambda _event: self.toggle())
         self.root.bind("<F9>", lambda _event: self.emergency_stop())
@@ -351,10 +453,30 @@ class AppWindow:
 
     def _append_log(self, text: str) -> None:
         timestamp = self.monitor.timestamp()
-        self.log.configure(state="normal")
-        self.log.insert("end", f"[{timestamp}] {text}\n")
-        self.log.see("end")
-        self.log.configure(state="disabled")
+        self.log_panel.append(f"[{timestamp}] {text}\n")
+
+    def toggle_logs(self) -> None:
+        self.root.update_idletasks()
+        if self.logs_visible:
+            self.paned.forget(self.log_panel)
+            self.logs_visible = False
+            self.log_toggle_var.set("Показать логи")
+            self.root.minsize(1100, 980)
+            self.root.geometry(f"{self._closed_window_width}x{self.root.winfo_height()}")
+            return
+
+        self._closed_window_width = max(1100, self.root.winfo_width())
+        self.paned.add(self.log_panel, weight=0)
+        self.logs_visible = True
+        self.log_toggle_var.set("Скрыть логи")
+        target_width = max(1500, self._closed_window_width + 500)
+        self.root.minsize(1500, 980)
+        self.root.geometry(f"{target_width}x{self.root.winfo_height()}")
+        self.root.update_idletasks()
+        try:
+            self.paned.sashpos(0, max(1000, target_width - 500))
+        except tk.TclError:
+            pass
 
     @staticmethod
     def _user_visible_ocr_text(snapshot: PollSnapshot) -> str:
