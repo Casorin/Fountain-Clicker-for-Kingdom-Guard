@@ -16,6 +16,7 @@ from PIL import Image
 from app.adb_client import AdbClient, AdbError
 from app.capture import crop_rect, save_screen
 from app.config import AppConfig
+from app.diagnostics_writer import DiagnosticsWriter
 from app.persistence import (
     PersistedState,
     ResetEvent,
@@ -23,7 +24,7 @@ from app.persistence import (
     load_reset_history,
     save_reset_history,
 )
-from app.fast_ocr import PrefilterResult, prefilter_range, recognize_digits_from_templates
+from app.fast_ocr import FastOcrResult, PrefilterResult, prefilter_range, recognize_digits_from_templates
 from app.recognition import (
     RecognitionResult,
     save_prize_ocr_debug_variants,
@@ -189,6 +190,9 @@ class PrizeMonitor:
         self._latest_prize_crop: Image.Image | None = None
         self._latest_capture_completed_at: datetime | None = None
         self._last_production_ocr: ProductionOcrResult | None = None
+        self._post_burst_paddle_pending = False
+        self._diagnostics_writer = DiagnosticsWriter(max_queue_size=20)
+        self._last_diagnostics_enqueue_accepted = True
         self._ocr_pipeline = ProductionOcrPipeline(
             engines=ProductionOcrEngines(),
             notification_tracker=NotificationVetoTracker(config.notification_dark_ratio_threshold),
@@ -865,8 +869,14 @@ class PrizeMonitor:
             return ()
         reasons: list[str] = []
         previous = self.state.last_confirmed_prize
-        if self.is_target_value(value):
-            reasons.append("click_range")
+        if self.is_target_value(value) and self.state.phase in {
+            MonitorPhase.WAITING,
+            MonitorPhase.CANDIDATE,
+            MonitorPhase.CONFIRMED,
+        }:
+            reasons.append("click_range_confirmation")
+        if self._post_burst_paddle_pending:
+            reasons.append("post_burst_check")
         if self.state.reset_candidate_hits > 0:
             reasons.append("potential_reset")
         if previous is not None:
@@ -894,19 +904,39 @@ class PrizeMonitor:
         self._latest_capture_completed_at = self._now()
         anchors = analyze_anchors(screen, self.config, None)
         started_fast = time.perf_counter()
-        prefilter = prefilter_range(
-            prize_crop,
-            self.config.digit_template_manifest_path,
-            self.config.fast_prefilter_confidence_threshold,
-            previous_reliable_value=self.state.last_confirmed_prize,
-            reset_min_trusted_value=self.config.reset_min_trusted_value,
-            max_components=self.config.fast_prefilter_max_components,
-        )
-        fast_template = recognize_digits_from_templates(
-            prize_crop,
-            self.config.digit_template_manifest_path,
-            self.config.fast_ocr_confidence_threshold,
-        )
+        if self.config.fast_prefilter_enabled:
+            prefilter = prefilter_range(
+                prize_crop,
+                self.config.digit_template_manifest_path,
+                self.config.fast_prefilter_confidence_threshold,
+                previous_reliable_value=self.state.last_confirmed_prize,
+                reset_min_trusted_value=self.config.reset_min_trusted_value,
+                max_components=self.config.fast_prefilter_max_components,
+            )
+            fast_template = recognize_digits_from_templates(
+                prize_crop,
+                self.config.digit_template_manifest_path,
+                self.config.fast_ocr_confidence_threshold,
+            )
+        else:
+            prefilter = PrefilterResult(
+                "NOT_RUN",
+                0.0,
+                None,
+                None,
+                "diagnostics not run",
+                {},
+                False,
+                "",
+            )
+            fast_template = FastOcrResult(
+                None,
+                0.0,
+                "disabled",
+                "",
+                "diagnostics not run",
+                0,
+            )
         fast_ms = (time.perf_counter() - started_fast) * 1000.0
 
         started_ocr = time.perf_counter()
@@ -919,6 +949,8 @@ class PrizeMonitor:
         authoritative_ocr_ms = (time.perf_counter() - started_ocr) * 1000.0
         authoritative_ocr_ran = production_result.rapid is not None
         self._last_production_ocr = production_result
+        if production_result.paddle is not None and "post_burst_check" in production_result.control_reasons:
+            self._post_burst_paddle_pending = False
         self.state.last_full_ocr_at = now if authoritative_ocr_ran else self.state.last_full_ocr_at
         self.state.notification_veto = (
             production_result.notification.veto
@@ -1340,31 +1372,38 @@ class PrizeMonitor:
     ) -> Path:
         stamp = self._now().strftime("%Y%m%d_%H%M%S_%f")
         target_dir = self.config.trigger_dir / stamp
-        target_dir.mkdir(parents=True, exist_ok=True)
-        screen.save(target_dir / "screen.png")
-        crop_rect(screen, self.config.prize_crop).save(target_dir / "prize_crop.png")
-        anchors.button_crop.save(target_dir / "button_crop.png")
-        crop_rect(screen, self.config.event_title_crop).save(target_dir / "title_crop.png")
-        screen.save(target_dir / "pre_tap_screen.png")
-        (target_dir / "decision.txt").write_text(
-            "\n".join(
-                [
-                    f"value={prize_result.value}",
-                    f"raw={prize_result.normalized_text}",
-                    f"variant={prize_result.variant_name}",
-                    f"title_score={anchors.title_score:.3f}",
-                    f"screen_anchor_score={anchors.screen_anchor_score:.3f}",
-                    f"button_score={anchors.button_score:.3f}",
-                    f"gold_ratio={anchors.gold_ratio:.3f}",
-                    f"title_text={anchors.title_text}",
-                    f"button_text={anchors.button_text}",
-                    f"phase={self.state.phase.value}",
-                    f"test_mode={self.state.test_mode}",
-                    f"real_mode_armed={self.state.real_mode_armed}",
-                ]
-            ),
-            encoding="utf-8",
+        decision_text = "\n".join(
+            [
+                f"value={prize_result.value}",
+                f"raw={prize_result.normalized_text}",
+                f"variant={prize_result.variant_name}",
+                f"title_score={anchors.title_score:.3f}",
+                f"screen_anchor_score={anchors.screen_anchor_score:.3f}",
+                f"button_score={anchors.button_score:.3f}",
+                f"gold_ratio={anchors.gold_ratio:.3f}",
+                f"title_text={anchors.title_text}",
+                f"button_text={anchors.button_text}",
+                f"phase={self.state.phase.value}",
+                f"test_mode={self.state.test_mode}",
+                f"real_mode_armed={self.state.real_mode_armed}",
+            ]
         )
+        images = {
+            "prize_crop.png": crop_rect(screen, self.config.prize_crop),
+            "button_crop.png": anchors.button_crop,
+        }
+        if self.state.real_mode_armed:
+            images.update(
+                {
+                    "screen.png": screen,
+                    "title_crop.png": crop_rect(screen, self.config.event_title_crop),
+                    "pre_tap_screen.png": screen,
+                }
+            )
+        accepted = self._diagnostics_writer.submit(target_dir, images, decision_text)
+        self._last_diagnostics_enqueue_accepted = accepted
+        if not accepted:
+            self.state.last_status = "Diagnostics queue full: PNG files skipped for this tap"
         return target_dir
 
     def _handle_active_clicking(
@@ -1457,8 +1496,8 @@ class PrizeMonitor:
             return clicked, would_tap, diagnostics_dir
 
         if self.state.next_click_at is None:
-            self.state.next_click_at = now
-        if now < self.state.next_click_at:
+            self.state.next_click_at = actual_now
+        if actual_now < self.state.next_click_at:
             return clicked, would_tap, diagnostics_dir
         if (
             self.state.last_tap_sent_at is not None
@@ -1470,6 +1509,10 @@ class PrizeMonitor:
             return clicked, would_tap, diagnostics_dir
 
         diagnostics_dir = self._save_trigger_diagnostics(screen, recognition, anchors)
+        if not getattr(self, "_last_diagnostics_enqueue_accepted", True):
+            tap_events.append(
+                f"{actual_now.strftime('%H:%M:%S.%f')[:-3]} WARNING diagnostics queue full"
+            )
         if self.state.real_mode_armed:
             self.adb.tap_persistent(self.config.tap_point.x, self.config.tap_point.y)
             clicked = True
@@ -1488,6 +1531,7 @@ class PrizeMonitor:
         if self.state.burst_taps_done >= self.config.burst_size:
             self.state.phase = MonitorPhase.CHECKING_AFTER_BURST
             self.state.checking_until = actual_now + timedelta(seconds=self.config.provisional_check_pause_seconds)
+            self._post_burst_paddle_pending = True
             self.state.last_status = "CHECKING_AFTER_BURST: waiting for clean frames after burst"
 
         return clicked, would_tap, diagnostics_dir
@@ -1736,4 +1780,5 @@ class PrizeMonitor:
         return datetime.now().strftime("%H:%M:%S")
 
     def close(self) -> None:
+        self._diagnostics_writer.close(timeout=3.0)
         self.adb.close_shell()

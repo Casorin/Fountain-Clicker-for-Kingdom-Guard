@@ -11,6 +11,7 @@ from app.config import AppConfig
 from app.fast_ocr import PrefilterResult
 from app.monitor import MonitorPhase, MonitorState, OcrStatus, PrizeMonitor
 from app.persistence import UserRangeConfig
+from app.production_ocr import EngineReading
 from app.recognition import RecognitionResult
 from app.vision import AnchorStatus
 
@@ -81,6 +82,7 @@ class InRangeConfirmationTests(unittest.TestCase):
         self.monitor.adb = FakeAdb()
         self.monitor._now_provider = lambda: self.now
         self.monitor._latest_capture_completed_at = self.now
+        self.monitor._post_burst_paddle_pending = False
         self.monitor._save_trigger_diagnostics = lambda *_args, **_kwargs: None
 
     def tearDown(self) -> None:
@@ -252,6 +254,51 @@ class InRangeConfirmationTests(unittest.TestCase):
         self.assertEqual(self.monitor.config.burst_size, 8)
         self.assertEqual(self.monitor.adb.tap_calls, [])
 
+    def test_full_synthetic_burst_uses_exact_500ms_cadence(self) -> None:
+        self.monitor.state.phase = MonitorPhase.ACTIVE_CLICKING
+        self.monitor.state.next_click_at = self.now
+        screen = Image.new("RGB", (16, 16), "white")
+        event_offsets: list[int] = []
+
+        for offset_ms in range(0, 4_000, 500):
+            self.now = datetime(2026, 7, 16, 12, 0, 0) + timedelta(milliseconds=offset_ms)
+            self.monitor._latest_capture_completed_at = self.now
+            clicked, would_tap, _ = self.monitor._handle_active_clicking(
+                self.now,
+                screen,
+                recognition(150_000 + offset_ms),
+                150_000 + offset_ms,
+                anchors(),
+                [],
+            )
+            self.assertFalse(clicked)
+            if would_tap:
+                event_offsets.append(offset_ms)
+
+        self.assertEqual(event_offsets, [0, 500, 1_000, 1_500, 2_000, 2_500, 3_000, 3_500])
+        self.assertEqual(self.monitor.state.phase, MonitorPhase.CHECKING_AFTER_BURST)
+        self.assertEqual(self.monitor.adb.tap_calls, [])
+
+    def test_scheduler_uses_current_frame_completion_time(self) -> None:
+        base = datetime(2026, 7, 16, 12, 0, 0)
+        self.monitor.state.phase = MonitorPhase.ACTIVE_CLICKING
+        self.monitor.state.last_tap_sent_at = base
+        self.monitor.state.next_click_at = base + timedelta(milliseconds=500)
+        self.now = base + timedelta(milliseconds=550)
+        self.monitor._latest_capture_completed_at = self.now
+
+        clicked, would_tap, _ = self.monitor._handle_active_clicking(
+            base + timedelta(milliseconds=200),
+            Image.new("RGB", (16, 16), "white"),
+            recognition(150_000),
+            150_000,
+            anchors(),
+            [],
+        )
+
+        self.assertEqual((clicked, would_tap), (False, True))
+        self.assertEqual(self.monitor.adb.tap_calls, [])
+
     def test_notification_immediately_stops_active_series(self) -> None:
         self.monitor.state.phase = MonitorPhase.ACTIVE_CLICKING
         self.monitor.state.next_click_at = self.now
@@ -390,6 +437,21 @@ class InRangeConfirmationTests(unittest.TestCase):
         self.assertEqual(self.monitor.state.phase, MonitorPhase.WAITING)
         self.assertIsNone(self.monitor.state.next_click_at)
         self.assertEqual(self.monitor.adb.tap_calls, [])
+
+    def test_paddle_controls_candidate_but_not_normal_active_frame(self) -> None:
+        reading = EngineReading("rapid", "150000", 150_000, 1.0, 10.0)
+        self.monitor.state.phase = MonitorPhase.CANDIDATE
+        self.assertIn("click_range_confirmation", self.monitor._paddle_control_reasons(reading))
+
+        self.monitor.state.phase = MonitorPhase.ACTIVE_CLICKING
+        self.assertNotIn("click_range_confirmation", self.monitor._paddle_control_reasons(reading))
+
+    def test_first_post_burst_check_requires_paddle(self) -> None:
+        reading = EngineReading("rapid", "150000", 150_000, 1.0, 10.0)
+        self.monitor.state.phase = MonitorPhase.CHECKING_AFTER_BURST
+        self.monitor._post_burst_paddle_pending = True
+
+        self.assertIn("post_burst_check", self.monitor._paddle_control_reasons(reading))
 
 
 if __name__ == "__main__":

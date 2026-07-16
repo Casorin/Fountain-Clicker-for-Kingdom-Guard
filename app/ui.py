@@ -13,8 +13,12 @@ from tkinter import messagebox, ttk
 from PIL import Image
 
 from app.config import AppConfig
-from app.monitor import PollSnapshot, PrizeMonitor
+from app.monitor import MonitorPhase, PollSnapshot, PrizeMonitor
 from app.single_instance import InstanceMetadata, SingleInstanceManager
+
+
+def poll_delay_ms(phase: MonitorPhase, normal_delay_ms: int) -> int:
+    return 1 if phase == MonitorPhase.ACTIVE_CLICKING else normal_delay_ms
 
 
 def _show_existing_instance_dialog(existing: InstanceMetadata | None) -> str:
@@ -869,7 +873,8 @@ class AppWindow:
         if not self.running:
             return
         self._tick()
-        self.root.after(self.config.poll_interval_ms, self._schedule_tick)
+        delay_ms = poll_delay_ms(self.monitor.state.phase, self.config.poll_interval_ms)
+        self.root.after(delay_ms, self._schedule_tick)
 
     def _tick(self) -> None:
         try:
