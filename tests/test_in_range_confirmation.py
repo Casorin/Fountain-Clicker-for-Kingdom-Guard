@@ -177,6 +177,7 @@ class InRangeConfirmationTests(unittest.TestCase):
             self.now,
             Image.new("RGB", (16, 16), "white"),
             recognition(),
+            123_500,
             anchors(),
             [],
         )
@@ -238,7 +239,7 @@ class InRangeConfirmationTests(unittest.TestCase):
             self.now = datetime(2026, 7, 16, 12, 0, 0) + timedelta(milliseconds=offset_ms)
             self.monitor._latest_capture_completed_at = self.now
             clicked, would_tap, _ = self.monitor._handle_active_clicking(
-                self.now, screen, recognition(), anchors(), []
+                self.now, screen, recognition(), 123_500, anchors(), []
             )
             return clicked, would_tap
 
@@ -260,6 +261,7 @@ class InRangeConfirmationTests(unittest.TestCase):
             self.now,
             Image.new("RGB", (16, 16), "white"),
             recognition(),
+            123_500,
             anchors(),
             [],
         )
@@ -267,6 +269,126 @@ class InRangeConfirmationTests(unittest.TestCase):
         self.assertFalse(clicked)
         self.assertFalse(would_tap)
         self.assertEqual(self.monitor.state.phase, MonitorPhase.CHECKING_AFTER_BURST)
+        self.assertEqual(self.monitor.adb.tap_calls, [])
+
+    def active_tick(
+        self,
+        trusted_value: int | None,
+        *,
+        ocr_status: OcrStatus = OcrStatus.VISIBLE,
+        next_click_offset_ms: int = 0,
+        frame_anchors: AnchorStatus | None = None,
+    ) -> tuple[bool, bool]:
+        self.monitor.state.phase = MonitorPhase.ACTIVE_CLICKING
+        self.monitor.state.ocr_status = ocr_status
+        self.monitor.state.next_click_at = self.now + timedelta(milliseconds=next_click_offset_ms)
+        self.monitor._latest_capture_completed_at = self.now
+        clicked, would_tap, _ = self.monitor._handle_active_clicking(
+            self.now,
+            Image.new("RGB", (16, 16), "white"),
+            recognition(trusted_value or 123_500),
+            trusted_value,
+            frame_anchors or anchors(),
+            [],
+        )
+        return clicked, would_tap
+
+    def test_a_current_value_above_maximum_stops_active_clicking(self) -> None:
+        self.monitor.state.candidate_hits = 2
+        self.monitor.state.burst_taps_done = 3
+        self.monitor.state.checking_until = self.now + timedelta(seconds=2)
+
+        self.assertEqual(self.active_tick(200_001), (False, False))
+        self.assertEqual(self.monitor.state.phase, MonitorPhase.WAITING)
+        self.assertIsNone(self.monitor.state.next_click_at)
+        self.assertIsNone(self.monitor.state.checking_until)
+        self.assertEqual(self.monitor.state.burst_taps_done, 0)
+        self.assertEqual(self.monitor.state.candidate_hits, 0)
+        self.assertEqual(self.monitor.adb.tap_calls, [])
+
+    def test_b_current_value_below_minimum_stops_active_clicking(self) -> None:
+        self.assertEqual(self.active_tick(99_999), (False, False))
+        self.assertEqual(self.monitor.state.phase, MonitorPhase.WAITING)
+        self.assertEqual(self.monitor.adb.tap_calls, [])
+
+    def test_c_stale_display_value_does_not_override_current_out_of_range_value(self) -> None:
+        self.monitor.state.last_value = 150_000
+
+        self.assertEqual(self.active_tick(200_001), (False, False))
+        self.assertEqual(self.monitor.state.last_value, 150_000)
+        self.assertEqual(self.monitor.state.phase, MonitorPhase.WAITING)
+        self.assertEqual(self.monitor.adb.tap_calls, [])
+
+    def test_d_missing_current_trusted_value_blocks_tap(self) -> None:
+        self.monitor.state.last_value = 150_000
+
+        self.assertEqual(
+            self.active_tick(None, ocr_status=OcrStatus.ERROR),
+            (False, False),
+        )
+        self.assertEqual(self.monitor.state.phase, MonitorPhase.WAITING)
+        self.assertEqual(self.monitor.adb.tap_calls, [])
+
+    def test_e_notification_hidden_current_value_blocks_tap(self) -> None:
+        self.monitor.state.notification_veto = True
+
+        self.assertEqual(
+            self.active_tick(None, ocr_status=OcrStatus.OBSCURED),
+            (False, False),
+        )
+        self.assertEqual(self.monitor.state.phase, MonitorPhase.CHECKING_AFTER_BURST)
+        self.assertEqual(self.monitor.adb.tap_calls, [])
+
+    def test_f_minimum_boundary_allows_virtual_tap(self) -> None:
+        self.assertEqual(self.active_tick(100_000), (False, True))
+        self.assertEqual(self.monitor.state.phase, MonitorPhase.ACTIVE_CLICKING)
+        self.assertEqual(self.monitor.adb.tap_calls, [])
+
+    def test_g_maximum_boundary_allows_virtual_tap(self) -> None:
+        self.assertEqual(self.active_tick(200_000), (False, True))
+        self.assertEqual(self.monitor.state.phase, MonitorPhase.ACTIVE_CLICKING)
+        self.assertEqual(self.monitor.adb.tap_calls, [])
+
+    def test_h_in_range_value_preserves_virtual_burst_logic(self) -> None:
+        self.assertEqual(self.active_tick(150_000), (False, True))
+        self.now += timedelta(milliseconds=499)
+        self.monitor._latest_capture_completed_at = self.now
+        clicked, would_tap, _ = self.monitor._handle_active_clicking(
+            self.now,
+            Image.new("RGB", (16, 16), "white"),
+            recognition(150_500),
+            150_500,
+            anchors(),
+            [],
+        )
+        self.assertEqual((clicked, would_tap), (False, False))
+        self.assertEqual(self.monitor.state.burst_taps_done, 1)
+        self.assertEqual(self.monitor.adb.tap_calls, [])
+
+    def test_i_reset_cooldown_phase_is_not_overwritten(self) -> None:
+        self.monitor.state.phase = MonitorPhase.RESET_COOLDOWN
+        self.monitor.state.cooldown_until = self.now + timedelta(seconds=120)
+
+        clicked, would_tap, _ = self.monitor._handle_active_clicking(
+            self.now,
+            Image.new("RGB", (16, 16), "white"),
+            recognition(10_000),
+            10_000,
+            anchors(),
+            [],
+        )
+
+        self.assertEqual((clicked, would_tap), (False, False))
+        self.assertEqual(self.monitor.state.phase, MonitorPhase.RESET_COOLDOWN)
+        self.assertEqual(self.monitor.adb.tap_calls, [])
+
+    def test_j_out_of_range_stops_before_next_click_is_due(self) -> None:
+        self.assertEqual(
+            self.active_tick(200_001, next_click_offset_ms=400),
+            (False, False),
+        )
+        self.assertEqual(self.monitor.state.phase, MonitorPhase.WAITING)
+        self.assertIsNone(self.monitor.state.next_click_at)
         self.assertEqual(self.monitor.adb.tap_calls, [])
 
 
