@@ -85,6 +85,8 @@ class MonitorState:
     reset_last_high_at: datetime | None = None
     reset_first_low_at: datetime | None = None
     reset_first_low_value: int | None = None
+    reset_first_low_capture_id: str | None = None
+    reset_pre_reset_peak: int | None = None
     peak_since_reset: int | None = None
     post_reset_baseline: int | None = None
     reset_episode_locked: bool = False
@@ -530,6 +532,8 @@ class PrizeMonitor:
         self.state.reset_last_high_at = None
         self.state.reset_first_low_at = None
         self.state.reset_first_low_value = None
+        self.state.reset_first_low_capture_id = None
+        self.state.reset_pre_reset_peak = None
         self.state.peak_since_reset = None
         self.state.post_reset_baseline = None
         self.state.ocr_status = OcrStatus.ERROR
@@ -686,6 +690,8 @@ class PrizeMonitor:
             "last_high_at": self.state.reset_last_high_at.isoformat() if self.state.reset_last_high_at else None,
             "first_low_value": self.state.reset_first_low_value,
             "first_low_at": self.state.reset_first_low_at.isoformat() if self.state.reset_first_low_at else None,
+            "first_low_capture_id": self.state.reset_first_low_capture_id,
+            "pre_reset_peak": self.state.reset_pre_reset_peak,
             "reset_event_at": reset_event_at.isoformat() if reset_event_at else None,
             "reset_confirmed_at": reset_confirmed_at.isoformat() if reset_confirmed_at else None,
             "confirmation_delay_seconds": (
@@ -723,24 +729,15 @@ class PrizeMonitor:
         if self.state.peak_since_reset is None or value > self.state.peak_since_reset:
             self.state.peak_since_reset = value
 
-    def _is_reset_first_low_value(self, value: int) -> bool:
-        return self.config.reset_low_min_value <= value <= self.config.reset_low_max_value
-
-    def _is_reset_confirmation_value(self, value: int) -> bool:
-        return self.config.reset_low_min_value <= value <= self.config.reset_confirmation_max_value
-
-    def _looks_like_reset_transition(self, previous_value: int, new_value: int) -> bool:
-        if not self._is_reset_first_low_value(new_value):
-            return False
-        return previous_value > self.config.reset_low_max_value
+    def _looks_like_reset_transition(
+        self,
+        previous_value: int,
+        new_value: int,
+    ) -> bool:
+        return new_value < previous_value
 
     def _is_reset_confirmation_frame(self, value: int | None) -> bool:
-        if value is None or self.state.reset_candidate_hits <= 0:
-            return False
-        first_low_value = self.state.reset_first_low_value
-        if first_low_value is None:
-            return False
-        return self._is_reset_confirmation_value(value)
+        return value is not None and self.state.reset_candidate_hits > 0
 
     def _save_outlier_diagnostics(
         self,
@@ -787,8 +784,7 @@ class PrizeMonitor:
         if raw_value < previous_trusted:
             self.state.growth_candidate_value = None
             self.state.growth_candidate_at = None
-            reference_peak = max(previous_trusted, self.state.peak_since_reset or previous_trusted)
-            if self._looks_like_reset_transition(reference_peak, raw_value):
+            if self._looks_like_reset_transition(previous_trusted, raw_value):
                 return raw_value, "accepted as reset low value"
             if self._is_reset_confirmation_frame(raw_value):
                 return raw_value, "accepted as reset confirmation continuation"
@@ -837,50 +833,28 @@ class PrizeMonitor:
         now = now or self._now()
         capture_id = capture_id or now.astimezone(self._local_zone()).strftime("%Y%m%d_%H%M%S_%f")
         seconds_since_reset = self._seconds_since_reset(now)
-        baseline = self.state.post_reset_baseline
-        if baseline is None:
-            self.state.reset_unlock_reason = "LOCKED: waiting for post-reset baseline"
-            return
-
-        if value <= baseline:
-            self.state.reset_growth_hits = 0
-            self.state.reset_growth_last_value = None
-            self.state.reset_growth_last_capture_id = None
-            self.state.reset_growth_last_at = None
-            self.state.reset_new_cycle_confirmed = False
-            self.state.reset_unlock_reason = (
-                "LOCKED: waiting for 120s"
-                if seconds_since_reset is None or seconds_since_reset < self.config.min_reset_interval_seconds
-                else "LOCKED: 120s passed, waiting for confirmed new high cycle"
-            )
-            return
-
         if capture_id == self.state.reset_growth_last_capture_id:
             return
 
-        if self.state.reset_growth_last_value is None or value > self.state.reset_growth_last_value:
-            self.state.reset_growth_hits += 1
-        elif value < self.state.reset_growth_last_value:
-            self.state.reset_growth_hits = 1
+        self.state.reset_growth_hits += 1
         self.state.reset_growth_last_value = value
         self.state.reset_growth_last_capture_id = capture_id
         self.state.reset_growth_last_at = now
 
-        peak_confirmed = (
-            self.state.peak_since_reset is not None
-            and self.state.peak_since_reset - baseline >= self.config.new_cycle_min_rise
+        interval_elapsed = (
+            seconds_since_reset is not None
+            and seconds_since_reset >= self.config.min_reset_interval_seconds
         )
-        self.state.reset_new_cycle_confirmed = self.state.reset_growth_hits >= 3 and peak_confirmed
-        if seconds_since_reset is None or seconds_since_reset < self.config.min_reset_interval_seconds:
+        self.state.reset_new_cycle_confirmed = self.state.reset_growth_hits >= 3 and interval_elapsed
+        if not interval_elapsed:
             self.state.reset_unlock_reason = "LOCKED: waiting for 120s"
             return
 
-        self.state.reset_unlock_reason = "LOCKED: 120s passed, waiting for confirmed new high cycle"
+        self.state.reset_unlock_reason = "LOCKED: 120s passed, waiting for independent trusted frames"
         if self.state.reset_new_cycle_confirmed:
             self.state.reset_episode_locked = False
             self.state.reset_unlock_reason = "UNLOCKED: confirmed new high cycle after previous reset"
-            self.state.reset_candidate_hits = 0
-            self.state.reset_candidate_value = None
+            self._clear_reset_candidate()
             self.state.reset_episode_token += 1
             self._save_reset_diagnostics(now, "episode_unlocked")
             self._save_persisted_state()
@@ -1162,11 +1136,44 @@ class PrizeMonitor:
             f"CANDIDATE: incompatible growth {previous}->{value}, restarted",
         )
 
+    def _clear_reset_candidate(self) -> None:
+        self.state.reset_candidate_hits = 0
+        self.state.reset_candidate_value = None
+        self.state.reset_last_high_at = None
+        self.state.reset_first_low_at = None
+        self.state.reset_first_low_value = None
+        self.state.reset_first_low_capture_id = None
+        self.state.reset_pre_reset_peak = None
+
+    def _reset_reading_has_paddle_control(self, recognition: RecognitionResult) -> bool:
+        return (
+            recognition.method == "rapidocr_ppocrv6_onnx"
+            and "confirmed by PaddleOCR" in recognition.fast_reason
+            and "paddle=" in recognition.fast_reason
+        )
+
+    def _start_reset_candidate(
+        self,
+        value: int,
+        capture_id: str,
+        now: datetime,
+        pre_reset_peak: int,
+        previous_high_at: datetime | None,
+    ) -> None:
+        self.state.reset_candidate_value = value
+        self.state.reset_candidate_hits = 1
+        self.state.reset_last_high_at = previous_high_at
+        self.state.reset_first_low_at = now
+        self.state.reset_first_low_value = value
+        self.state.reset_first_low_capture_id = capture_id
+        self.state.reset_pre_reset_peak = pre_reset_peak
+
     def _update_reset_detection(
         self,
         value: int | None,
         ocr_status: OcrStatus,
         now: datetime,
+        capture_id: str,
         previous_trusted_at: datetime | None,
         recognition: RecognitionResult,
         anchors: AnchorStatus,
@@ -1174,10 +1181,10 @@ class PrizeMonitor:
     ) -> None:
         previous_high_value = self.state.last_confirmed_prize
         previous_high_at = previous_trusted_at or self.state.last_trusted_at
-        if (
-            value is None
-            or ocr_status != OcrStatus.VISIBLE
-        ):
+        if value is None or ocr_status != OcrStatus.VISIBLE or self.state.notification_veto:
+            if self.state.reset_candidate_hits > 0:
+                self._clear_reset_candidate()
+                self.state.last_status = "Reset candidate canceled: clean controlled OCR was lost"
             return
         if previous_high_value is None:
             self.state.last_confirmed_prize = value
@@ -1195,22 +1202,15 @@ class PrizeMonitor:
             and (now - self.state.reset_first_low_at).total_seconds()
             > self.config.reset_candidate_timeout_seconds
         ):
-            self.state.reset_candidate_hits = 0
-            self.state.reset_candidate_value = None
-            self.state.reset_last_high_at = None
-            self.state.reset_first_low_at = None
-            self.state.reset_first_low_value = None
+            self._clear_reset_candidate()
             self.state.last_status = "Reset candidate timed out"
 
         if not self._reset_interval_elapsed(now):
-            self.state.reset_candidate_hits = 0
-            self.state.reset_candidate_value = None
-            self.state.reset_last_high_at = None
-            self.state.reset_first_low_at = None
-            self.state.reset_first_low_value = None
+            decreased = value < previous_high_value
+            self._clear_reset_candidate()
             self.state.last_confirmed_prize = value
             self.state.last_trusted_at = now
-            if self._looks_like_reset_transition(self.state.peak_since_reset or previous_high_value, value):
+            if decreased:
                 self.state.last_status = (
                     f"Reset blocked by min interval: осталось "
                     f"{self._reset_interval_remaining(now)}с"
@@ -1218,49 +1218,75 @@ class PrizeMonitor:
                 self._save_reset_diagnostics(now, "blocked_min_interval", recognition, anchors, prefilter)
             return
 
-        reference_peak = self.state.peak_since_reset or previous_high_value
-        if previous_high_value > reference_peak:
-            reference_peak = previous_high_value
-
-        starts_reset = self._looks_like_reset_transition(reference_peak, value)
-        confirms_reset = self._is_reset_confirmation_frame(value)
-        if self.state.reset_candidate_hits == 0 and not starts_reset:
-            self.state.reset_candidate_hits = 0
-            self.state.reset_candidate_value = None
-            self.state.reset_last_high_at = None
-            self.state.reset_first_low_at = None
-            self.state.reset_first_low_value = None
-            self.state.last_confirmed_prize = value
-            self.state.last_trusted_at = now
-            return
-
+        reference_peak = max(self.state.peak_since_reset or previous_high_value, previous_high_value)
+        controlled = self._reset_reading_has_paddle_control(recognition)
         if self.state.reset_candidate_hits == 0:
-            self.state.reset_candidate_value = value
-            self.state.reset_candidate_hits = 1
-            self.state.reset_last_high_at = previous_high_at
-            self.state.reset_first_low_at = now
-            self.state.reset_first_low_value = value
-            self._save_reset_diagnostics(now, "potential", recognition, anchors, prefilter)
-        else:
-            if not confirms_reset:
-                self.state.reset_candidate_hits = 0
-                self.state.reset_candidate_value = None
-                self.state.reset_last_high_at = None
-                self.state.reset_first_low_at = None
-                self.state.reset_first_low_value = None
+            if value >= previous_high_value:
+                self._clear_reset_candidate()
                 self.state.last_confirmed_prize = value
                 self.state.last_trusted_at = now
-                self.state.last_status = "False reset candidate canceled"
                 return
-            self.state.reset_candidate_value = value
-            self.state.reset_candidate_hits += 1
-            if self.state.reset_first_low_at is None:
-                self.state.reset_first_low_at = now
-            if self.state.reset_first_low_value is None:
-                self.state.reset_first_low_value = value
+            if not controlled:
+                self._clear_reset_candidate()
+                self.state.last_status = "Reset candidate blocked: PaddleOCR control is required"
+                return
+            self._start_reset_candidate(
+                value,
+                capture_id,
+                now,
+                reference_peak,
+                previous_high_at,
+            )
+            self._save_reset_diagnostics(now, "potential", recognition, anchors, prefilter)
+            return
+
+        if capture_id == self.state.reset_first_low_capture_id:
+            self.state.last_status = "Reset candidate: duplicate capture ignored"
+            return
+        if not controlled:
+            self._clear_reset_candidate()
+            self.state.last_status = "Reset candidate canceled: PaddleOCR control was lost"
+            return
+
+        first_low = self.state.reset_first_low_value
+        pre_reset_peak = self.state.reset_pre_reset_peak
+        first_low_at = self.state.reset_first_low_at
+        if first_low is None or pre_reset_peak is None or first_low_at is None:
+            self._clear_reset_candidate()
+            self.state.last_status = "Reset candidate canceled: incomplete first-low evidence"
+            return
+        if value < first_low:
+            self._start_reset_candidate(
+                value,
+                capture_id,
+                now,
+                pre_reset_peak,
+                self.state.reset_last_high_at,
+            )
+            self.state.last_status = "Reset candidate restarted at a lower independent value"
+            return
+        if value >= pre_reset_peak:
+            self._clear_reset_candidate()
+            self.state.last_confirmed_prize = value
+            self.state.last_trusted_at = now
+            self.state.last_status = "False reset candidate canceled: value returned to pre-reset level"
+            return
+
+        elapsed = max(0.10, (now - first_low_at).total_seconds())
+        allowed_growth = int(
+            self.config.max_realistic_growth_per_second * elapsed
+            + self.config.realistic_growth_slack
+        )
+        if value - first_low > allowed_growth:
+            self._clear_reset_candidate()
+            self.state.last_status = "Reset candidate canceled: incompatible low-cycle growth"
+            return
+
+        self.state.reset_candidate_value = value
+        self.state.reset_candidate_hits += 1
 
         if self.state.reset_candidate_hits >= self.config.reset_confirm_reads_required:
-            reset_event_at = self.state.reset_first_low_at or now
+            reset_event_at = first_low_at
             reset_confirmed_at = now
             self.state.last_reset_at = reset_event_at
             self.state.last_reset_confirmed_at = reset_confirmed_at
@@ -1269,13 +1295,11 @@ class PrizeMonitor:
             self.state.manual_reset_block_real_taps = False
             self.state.phase = MonitorPhase.RESET_COOLDOWN
             self._clear_candidate()
-            self.state.reset_candidate_hits = 0
-            self.state.reset_candidate_value = None
             self.state.burst_taps_done = 0
             self.state.next_click_at = None
             self.state.checking_until = None
             self._append_reset_history(
-                reference_peak,
+                pre_reset_peak,
                 value,
                 reset_event_at,
                 reset_confirmed_at,
@@ -1285,7 +1309,7 @@ class PrizeMonitor:
             self.state.last_confirmed_prize = value
             self.state.last_trusted_at = reset_event_at
             self.state.peak_since_reset = value
-            self.state.post_reset_baseline = self.state.reset_first_low_value or value
+            self.state.post_reset_baseline = first_low
             self.state.reset_episode_locked = True
             self.state.reset_growth_hits = 0
             self.state.reset_growth_last_value = value
@@ -1305,9 +1329,7 @@ class PrizeMonitor:
                 reset_event_at=reset_event_at,
                 reset_confirmed_at=reset_confirmed_at,
             )
-            self.state.reset_last_high_at = None
-            self.state.reset_first_low_at = None
-            self.state.reset_first_low_value = None
+            self._clear_reset_candidate()
             self._save_persisted_state()
 
     def _save_trigger_diagnostics(
@@ -1458,6 +1480,17 @@ class PrizeMonitor:
         self._append_observation(now, recognition, anchors, prefilter)
 
         if (
+            self.state.reset_candidate_hits > 0
+            and (
+                self.state.notification_veto
+                or self.state.ocr_status != OcrStatus.VISIBLE
+                or trusted_value is None
+            )
+        ):
+            self._clear_reset_candidate()
+            self.state.last_status = "Reset candidate canceled: clean controlled OCR was lost"
+
+        if (
             self.state.phase not in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}
             and self.state.ocr_status == OcrStatus.VISIBLE
             and trusted_value is not None
@@ -1468,6 +1501,7 @@ class PrizeMonitor:
                 trusted_value,
                 self.state.ocr_status,
                 now,
+                capture_id,
                 previous_trusted_at=previous_trusted_at,
                 recognition=recognition,
                 anchors=anchors,
