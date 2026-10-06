@@ -378,7 +378,20 @@ class AppWindow:
         elif self.running:
             self.monitor.resume()
 
-    def apply_range(self) -> None:
+    def on_start_method_changed(self) -> None:
+        if getattr(self, '_confirming_start_method', False) or not self.mode_var.get():
+            return
+        previous = self.monitor.user_range.start_method
+        if self.start_method_var.get() == previous:
+            return
+        self._confirming_start_method = True
+        try:
+            if not self.apply_range():
+                self.start_method_var.set(previous)
+        finally:
+            self._confirming_start_method = False
+
+    def apply_range(self) -> bool:
         try:
             min_value = int(self.test_range_min_var.get().replace(" ", "").strip())
             max_value = int(self.test_range_max_var.get().replace(" ", "").strip())
@@ -386,30 +399,32 @@ class AppWindow:
             start_percent = int(self.start_percent_var.get().strip())
         except ValueError:
             messagebox.showerror("Ошибка настроек", "Значения фонда, процент и остаток самоцветов должны быть целыми числами.")
-            return
+            return False
 
         if self.mode_var.get():
             range_text = (f"{start_percent}% от фонда перед последним обнулением" if self.start_method_var.get() == 'percent'
                           else f"от {min_value:,}, без верхнего предела" if self.no_upper_var.get()
                           else f"{min_value:,} - {max_value:,}")
             approved = messagebox.askyesno(
-                "Изменение диапазона в реальном режиме",
+                "Перейти на новое правило кликов?",
                 "Сейчас включены настоящие клики.\n"
-                f"Новый диапазон: {range_text}.\n".replace(',',' ')
+                f"Новое правило: {range_text}.\n".replace(',',' ')
                 + (f"Оставить на счёте не меньше {gem_floor:,} самоцветов.\n".replace(',',' ') if gem_floor is not None else "Ограничение остатка выключено.\n")
                 +
-                "Продолжить?",
+                "После подтверждения настройки будут сохранены.\n"
+                "Клики продолжатся только при выполнении нового правила.\n"
+                "Применить эти настройки?",
                 icon="warning",
             )
             if not approved:
-                return
+                return False
 
         ok, message = self.monitor.update_test_range(min_value, max_value,
             no_upper_limit=self.no_upper_var.get(), minimum_gems=gem_floor, update_gem_limit=True,
             start_method=self.start_method_var.get(), start_percent=start_percent)
         if not ok:
             messagebox.showerror("Ошибка диапазона", message)
-            return
+            return False
         if self._group:
             self._group.update_settings(self.monitor.user_range)
 
@@ -418,6 +433,7 @@ class AppWindow:
         self._append_log(message)
         if hasattr(self, 'design'):
             self.design.mark_saved()
+        return True
 
     def _connect(self) -> None:
         if self._selection_error:

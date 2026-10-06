@@ -30,6 +30,7 @@ class DesignTests(unittest.TestCase):
         app.gem_balance_var=tk.StringVar(self.root,value='')
         for name in ('toggle', 'reset_lock', 'apply_range', 'clear_all_history', 'delete_selected_history_entry', 'toggle_logs', '_sync_mode', '_append_log', 'choose_window', '_focus_session', '_update_group_table', 'open_program_window','emergency_stop'):
             setattr(app, name, Mock())
+        app.on_start_method_changed = Mock()
         self.app = app
         self.design = FountainDesign(app)
         self.root.update()

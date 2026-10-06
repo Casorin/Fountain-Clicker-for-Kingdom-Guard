@@ -421,6 +421,7 @@ class FountainDesign:
         app._update_group_table()
         self.update_upper_entry()
         app.start_method_var.trace_add('write', lambda *_: self.update_start_method())
+        app.start_method_var.trace_add('write', lambda *_: self.root.after_idle(app.on_start_method_changed))
         self.update_start_method()
         self.pulse()
 
