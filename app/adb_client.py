@@ -3,6 +3,10 @@ from __future__ import annotations
 import subprocess
 import threading
 import atexit
+import queue
+import time
+import uuid
+import re
 from pathlib import Path
 
 
@@ -16,9 +20,15 @@ class AdbClient:
         self.serial = serial
         self._shell: subprocess.Popen[bytes] | None = None
         self._shell_lock = threading.Lock()
+        self._shell_output: queue.Queue[bytes | None] = queue.Queue()
+        self._shell_reader: threading.Thread | None = None
         atexit.register(self.close_shell)
 
     def _run(self, *args: str, check: bool = True, timeout: float = 15.0) -> subprocess.CompletedProcess[bytes]:
+        from app.memory_guard import low_memory_message
+        memory_error = low_memory_message()
+        if memory_error:
+            raise AdbError(memory_error)
         command = [str(self.adb_path), *args]
         try:
             completed = subprocess.run(
@@ -80,15 +90,29 @@ class AdbClient:
             self._shell = subprocess.Popen(
                 [str(self.adb_path), "-s", self.serial, "shell"],
                 stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as exc:
             raise AdbError(f"Could not start persistent adb shell: {exc}") from exc
+        output: queue.Queue[bytes | None] = queue.Queue()
+        self._shell_output = output
+        stream = self._shell.stdout
+        def read_output() -> None:
+            try:
+                if stream is not None:
+                    for line in iter(stream.readline, b""):
+                        output.put(line)
+            finally:
+                output.put(None)
+        self._shell_reader = threading.Thread(target=read_output, name="kgpm-adb-ack", daemon=True)
+        self._shell_reader.start()
         return self._shell
 
     def tap_persistent(self, x: int, y: int) -> None:
-        command = f"input tap {int(x)} {int(y)}\n".encode("ascii")
+        token = "KGPM_DONE_" + uuid.uuid4().hex
+        command = f"input tap {int(x)} {int(y)}; echo {token}:$?\n".encode("ascii")
         with self._shell_lock:
             shell = self._persistent_shell()
             if shell.stdin is None:
@@ -96,6 +120,23 @@ class AdbClient:
             try:
                 shell.stdin.write(command)
                 shell.stdin.flush()
+                deadline = time.monotonic() + 0.75
+                pattern = re.compile(rb"(?:^|\s)" + token.encode("ascii") + rb":(\d+)\s*$")
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise AdbError("Android did not acknowledge tap; automatic retry is forbidden")
+                    try:
+                        line = self._shell_output.get(timeout=remaining)
+                    except queue.Empty as exc:
+                        raise AdbError("Android tap acknowledgement timed out; automatic retry is forbidden") from exc
+                    if line is None:
+                        raise AdbError("ADB shell disconnected before tap acknowledgement")
+                    match = pattern.search(line)
+                    if match:
+                        if int(match.group(1)) != 0:
+                            raise AdbError("Android input tap failed")
+                        break
             except (BrokenPipeError, OSError) as exc:
                 self.close_shell()
                 raise AdbError(f"Persistent adb shell write failed: {exc}") from exc
@@ -116,3 +157,10 @@ class AdbClient:
                 shell.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
                 shell.kill()
+                shell.wait(timeout=2.0)
+        reader = self._shell_reader
+        self._shell_reader = None
+        if reader is not None:
+            reader.join(timeout=0.3)
+        if shell.stdout is not None:
+            shell.stdout.close()

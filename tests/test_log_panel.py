@@ -104,8 +104,8 @@ class LogPanelTests(unittest.TestCase):
         self.assertTrue(app.logs_visible)
         self.assertEqual(app.log_toggle_var.get(), "Скрыть логи")
         self.assertTrue(self.panel.winfo_ismapped())
-        self.assertGreaterEqual(self.root.winfo_width(), 1500)
-        self.assertGreaterEqual(self.paned.sashpos(0), 1000)
+        self.assertEqual(self.root.winfo_width(), 1100+380)
+        self.assertGreaterEqual(self.paned.sashpos(0), 1100)
 
         app.toggle_logs()
         self.root.update()

@@ -16,13 +16,16 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
-".venv\Scripts\python.exe" -m app.ui
+if not exist "runtime" mkdir "runtime"
+".venv\Scripts\python.exe" -m app.ui >>"runtime\launcher_stdout.log" 2>>"runtime\launcher_stderr.log"
 set "RC=!ERRORLEVEL!"
 popd
 
 if not "!RC!"=="0" (
     echo.
     echo Program exited with code !RC!.
+    echo Startup error log: runtime\launcher_stderr.log
+    type "runtime\launcher_stderr.log"
     pause
 )
 

@@ -5,7 +5,12 @@ import os
 import sys
 import threading
 import time
+import faulthandler
+import argparse
+import subprocess
+import uuid
 import tkinter as tk
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -15,6 +20,7 @@ from PIL import Image
 from app.config import AppConfig
 from app.monitor import MonitorPhase, PollSnapshot, PrizeMonitor
 from app.single_instance import InstanceMetadata, SingleInstanceManager
+from app.stream_transport import FreshFrameUnavailable
 
 
 def poll_delay_ms(phase: MonitorPhase, normal_delay_ms: int) -> int:
@@ -96,7 +102,7 @@ def _start_or_focus_existing_instance(config: AppConfig, manager: SingleInstance
                 return None
             manager.remove_stale_metadata()
 
-        retry = SingleInstanceManager(config.instance_state_path)
+        retry = SingleInstanceManager(config.instance_state_path, manager.mutex_name)
         acquired_retry, _ = retry.try_acquire()
         if acquired_retry:
             return retry
@@ -110,17 +116,21 @@ def _start_or_focus_existing_instance(config: AppConfig, manager: SingleInstance
     return None
 
 
-class LogPanel(ttk.LabelFrame):
-    def __init__(self, parent: tk.Misc) -> None:
-        super().__init__(parent, text="Логи", padding=8)
+class LogPanel(ttk.Frame):
+    def __init__(self, parent: tk.Misc, on_close=None) -> None:
+        super().__init__(parent, style='RoundedCard.TFrame', padding=8)
         self.follow_logs = True
         self._inserting = False
-
+        header=ttk.Frame(self,style='Card.TFrame')
+        header.pack(fill='x',pady=(0,6))
+        ttk.Label(header,text='Журнал событий',style='Card.TLabel',font=('Bahnschrift',12,'bold')).pack(side='left')
+        self.close_button=ttk.Button(header,text='×',style='Log.Tool.TButton',width=2,command=on_close or (lambda: None))
+        self.close_button.pack(side='right')
         toolbar = ttk.Frame(self)
         toolbar.pack(fill="x", pady=(0, 6))
-        ttk.Button(toolbar, text="К последним логам", command=self.go_to_latest).pack(side="left")
-        ttk.Button(toolbar, text="Копировать всё", command=self.copy_all).pack(side="left", padx=(6, 0))
-        ttk.Button(toolbar, text="Очистить отображение", command=self.clear_display).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="К последним", style='Log.Tool.TButton',command=self.go_to_latest).pack(side="left")
+        ttk.Button(toolbar, text="Копировать всё", style='Log.Tool.TButton',command=self.copy_all).pack(side="left", padx=(4, 0))
+        ttk.Button(toolbar, text="Очистить отображение", style='Log.Tool.TButton',command=self.clear_display).pack(side="left", padx=(4, 0))
         self.new_entries_button = ttk.Button(
             toolbar,
             text="Есть новые записи ↓",
@@ -137,10 +147,11 @@ class LogPanel(ttk.LabelFrame):
             width=58,
             height=20,
         )
-        self.scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=self.text.yview)
+        from app.window_picker import PinkScrollbar
+        self.scrollbar = PinkScrollbar(text_frame,self.text.yview,ttk.Style(self).lookup('Card.TFrame','background') or '#ffffff')
         self.text.configure(yscrollcommand=self._on_yview)
-        self.text.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
+        self.text.pack(side="left", fill="both", expand=True)
         self.text.bind("<MouseWheel>", self._on_user_scroll, add="+")
         self.text.bind("<Button-4>", self._on_user_scroll, add="+")
         self.text.bind("<Button-5>", self._on_user_scroll, add="+")
@@ -202,14 +213,55 @@ class LogPanel(ttk.LabelFrame):
 
 
 class AppWindow:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, config=None, profile="default") -> None:
         self.root = root
-        self.config = AppConfig()
+        self.profile = profile
+        self.config = config or AppConfig()
+        self.config = replace(self.config,stream_transport_enabled=True,
+                              continuous_click_interval_seconds=.125,continuous_max_taps=0)
+        self._base_config = self.config
+        from app.profiles import DeviceLeases
+        self._device_leases = DeviceLeases(AppConfig().runtime_dir / 'device_owners')
+        self._selection_path = self.config.runtime_dir / 'window_selection.json'
+        self._selection_error = ''
+        self._selected_window = None
+        self._selected_windows = []
+        self._group = None
+        self._session_snapshots = {}
+        self._session_statuses = {}
+        self._focus_uuid = None
+        self._switching_window = False
+        self._window_picker_active = False
+        if self._selection_path.exists():
+            from app.memu_windows import resolve_selections, config_for_window
+            try:
+                self._selected_windows = resolve_selections(self._selection_path, self.config.adb_path)
+                self._selected_window = self._selected_windows[0] if self._selected_windows else None
+                if self._selected_window is None:
+                    self._selection_error = 'Выбранное окно MEmu закрыто. Нажмите «Выбрать окно».'
+                else:
+                    self.config = config_for_window(self._base_config, self._selected_window)
+            except Exception:
+                self._selection_error = 'Не удалось проверить выбранное окно. Нажмите «Выбрать окно».'
+        elif profile != 'default':
+            self._selection_error = 'Нажмите «Выбрать окно», чтобы подключить MEmu к этому окну программы.'
+        if not self._selection_error:
+            try:
+                serials = ([identity for w in self._selected_windows for identity in (w.serial, 'device:' + w.uuid)]
+                           or [self.config.adb_serial])
+                self._device_leases.acquire(serials)
+            except Exception as exc:
+                self._selection_error = str(exc)
         self.monitor = PrizeMonitor(self.config)
+        self._poll_thread: threading.Thread | None = None
+        self._poll_result = None
+        self._poll_error = None
+        self._cleanup_thread = None
         self.running = False
         self.ocr_warmup_complete = False
         self.ocr_warmup_error: str | None = None
         self.ocr_warmup_report: dict[str, object] = {}
+        self.ocr_warmup_stage = "Подготовка распознавания"
         self._warmup_start_requested = os.environ.get("KGPM_AUTO_START", "0") == "1"
         self._warmup_thread: threading.Thread | None = None
         self.close_callback = None
@@ -220,13 +272,16 @@ class AppWindow:
         self._acceptance_control_images = 0
         self._acceptance_min_seconds = float(os.environ.get("KGPM_ACCEPTANCE_MIN_SECONDS", "600"))
         self.logs_visible = False
+        self._last_status_write = 0.0
+        self._last_transition = None
         self._closed_window_width = 1100
 
-        self.root.title("Kingdom Guard Prize Monitor")
+        self.root.title("Kingdom Guard Prize Monitor | Рабочая версия")
         self.root.geometry("1100x980")
         self.root.minsize(1100, 980)
 
         self.connection_var = tk.StringVar(value="Проверка...")
+        self.window_label_var = tk.StringVar(value=self._selected_window.name if self._selected_window else 'MEmu')
         self.value_var = tk.StringVar(value="—")
         self.status_var = tk.StringVar(value="Ожидание")
         self.phase_var = tk.StringVar(value=self.monitor.state.phase.value)
@@ -249,170 +304,66 @@ class AppWindow:
         self.reset_min_var = tk.StringVar(value="недостаточно данных")
         self.reset_max_var = tk.StringVar(value="недостаточно данных")
         self.active_range_var = tk.StringVar(value=self.monitor.target_range_label())
-        self.test_range_min_var = tk.StringVar(value=str(self.monitor.user_range.test_min_prize))
-        self.test_range_max_var = tk.StringVar(value=str(self.monitor.user_range.test_max_prize))
+        self.test_range_min_var = tk.StringVar(value=f"{self.monitor.user_range.test_min_prize:,}".replace(",", " "))
+        self.test_range_max_var = tk.StringVar(value=f"{self.monitor.user_range.test_max_prize:,}".replace(",", " "))
         self.log_toggle_var = tk.StringVar(value="Показать логи")
+        self.no_upper_var = tk.BooleanVar(value=self.monitor.user_range.no_upper_limit)
+        self.start_method_var = tk.StringVar(value=self.monitor.user_range.start_method)
+        self.start_percent_var = tk.StringVar(value=str(self.monitor.user_range.start_percent))
+        self.gem_limit_enabled_var = tk.BooleanVar(value=self.monitor.user_range.minimum_gems is not None)
+        self.gem_floor_var = tk.StringVar(value=f"{self.monitor.user_range.minimum_gems if self.monitor.user_range.minimum_gems is not None else 40000:,}".replace(',',' '))
+        self.gem_balance_var = tk.StringVar(value="Баланс: проверяем")
+        if self._selected_windows:
+            self._install_group(self._selected_windows, self.monitor)
 
         self._build()
+        if profile != 'default':
+            from app.version import APP_VERSION
+            self.root.title(f'Фонтан {APP_VERSION} — отдельный фонд ' + profile)
         self._bind_hotkeys()
         self._connect()
         self._refresh_static_panels()
         self._start_ocr_warmup()
+        self.root.after(100, self._collect_group)
 
     def _build(self) -> None:
-        self.paned = ttk.PanedWindow(self.root, orient="horizontal")
-        self.paned.pack(fill="both", expand=True)
-        frame = ttk.Frame(self.paned, padding=12)
-        self.main_frame = frame
-        self.paned.add(frame, weight=1)
-        self.log_panel = LogPanel(self.paned)
-        self.log = self.log_panel.text
-
-        info = ttk.Frame(frame)
-        info.pack(fill="x")
-
-        mode_frame = ttk.LabelFrame(frame, text="Режим и диапазон", padding=8)
-        mode_frame.pack(fill="x", pady=(0, 10))
-        ttk.Label(mode_frame, textvariable=self.mode_banner_var, font=("Segoe UI", 13, "bold")).pack(anchor="w")
-        ttk.Label(mode_frame, textvariable=self.range_var, font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(2, 0))
-        ttk.Label(mode_frame, textvariable=self.tap_policy_var, font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(2, 0))
-
-        ttk.Label(info, text="Статус MEmu:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Label(info, textvariable=self.connection_var).grid(row=0, column=1, sticky="w", pady=4)
-        ttk.Label(info, text="Последнее значение:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Label(info, textvariable=self.value_var).grid(row=1, column=1, sticky="w", pady=4)
-        ttk.Label(info, text="Видимость призового фонда:").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Label(info, textvariable=self.ocr_var).grid(row=2, column=1, sticky="w", pady=4)
-        ttk.Label(info, text="Состояние:").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Label(info, textvariable=self.phase_var).grid(row=3, column=1, sticky="w", pady=4)
-        ttk.Label(info, text="Подтверждения:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Label(info, textvariable=self.confirmations_var).grid(row=4, column=1, sticky="w", pady=4)
-
-        ttk.Label(info, text="Экран события:").grid(row=0, column=2, sticky="w", padx=(28, 8), pady=4)
-        ttk.Label(info, textvariable=self.screen_var).grid(row=0, column=3, sticky="w", pady=4)
-        ttk.Label(info, text="Кнопка:").grid(row=1, column=2, sticky="w", padx=(28, 8), pady=4)
-        ttk.Label(info, textvariable=self.button_var).grid(row=1, column=3, sticky="w", pady=4)
-        ttk.Label(info, text="Режим:").grid(row=2, column=2, sticky="w", padx=(28, 8), pady=4)
-        ttk.Label(info, textvariable=self.mode_label_var).grid(row=2, column=3, sticky="w", pady=4)
-        ttk.Label(info, text="Статус:").grid(row=3, column=2, sticky="w", padx=(28, 8), pady=4)
-        ttk.Label(info, textvariable=self.status_var).grid(row=3, column=3, sticky="w", pady=4)
-        ttk.Label(info, text="Последнее обнуление:").grid(row=4, column=2, sticky="w", padx=(28, 8), pady=4)
-        ttk.Label(info, textvariable=self.last_reset_var).grid(row=4, column=3, sticky="w", pady=4)
-        ttk.Label(info, text="Прошло после reset:").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Label(info, textvariable=self.since_reset_var).grid(row=5, column=1, sticky="w", pady=4)
-        ttk.Label(info, text="До разрешения кликов:").grid(row=5, column=2, sticky="w", padx=(28, 8), pady=4)
-        ttk.Label(info, textvariable=self.cooldown_var).grid(row=5, column=3, sticky="w", pady=4)
-        ttk.Label(info, text="Активная серия:").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Label(info, textvariable=self.active_burst_var).grid(row=6, column=1, sticky="w", pady=4)
-        ttk.Label(info, text="Всего tap за сеанс:").grid(row=6, column=2, sticky="w", padx=(28, 8), pady=4)
-        ttk.Label(info, textvariable=self.total_taps_var).grid(row=6, column=3, sticky="w", pady=4)
-
-        controls = ttk.Frame(frame, padding=(0, 12, 0, 12))
-        controls.pack(fill="x")
-        ttk.Button(controls, text="Запустить мониторинг", command=self.start).pack(side="left")
-        ttk.Button(controls, text="Пауза", command=self.pause).pack(side="left", padx=8)
-        ttk.Button(controls, text="Сбросить состояние", command=self.reset_lock).pack(side="left", padx=8)
-        ttk.Checkbutton(
-            controls,
-            text="Реальный режим",
-            variable=self.mode_var,
-            command=self._sync_mode,
-        ).pack(side="left", padx=16)
-        self.log_toggle_button = ttk.Button(
-            controls,
-            textvariable=self.log_toggle_var,
-            command=self.toggle_logs,
-        )
-        self.log_toggle_button.pack(side="right")
-
-        range_frame = ttk.LabelFrame(frame, text="Настройка диапазона кликов", padding=8)
-        range_frame.pack(fill="x", pady=(0, 10))
-        ttk.Label(range_frame, text="Минимальное значение:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
-        ttk.Entry(range_frame, textvariable=self.test_range_min_var, width=12).grid(row=0, column=1, sticky="w", pady=2)
-        ttk.Label(range_frame, text="Максимальное значение:").grid(row=0, column=2, sticky="w", padx=(20, 8), pady=2)
-        ttk.Entry(range_frame, textvariable=self.test_range_max_var, width=12).grid(row=0, column=3, sticky="w", pady=2)
-        ttk.Button(range_frame, text="Применить", command=self.apply_range).grid(row=0, column=4, sticky="w", padx=(20, 0), pady=2)
-        ttk.Label(range_frame, text="Активный диапазон:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 2))
-        ttk.Label(range_frame, textvariable=self.active_range_var, font=("Segoe UI", 11, "bold")).grid(
-            row=1,
-            column=1,
-            columnspan=4,
-            sticky="w",
-            pady=(8, 2),
-        )
-
-        stats_frame = ttk.LabelFrame(frame, text="СТАТИСТИКА ОБНУЛЕНИЙ", padding=8)
-        stats_frame.pack(fill="x", pady=(0, 10))
-        stats_frame.columnconfigure(1, weight=1)
-        ttk.Label(stats_frame, text="С последнего обнуления:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
-        ttk.Label(stats_frame, textvariable=self.reset_since_var).grid(row=0, column=1, sticky="w", pady=2)
-        ttk.Label(stats_frame, text="Средний интервал:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
-        ttk.Label(stats_frame, textvariable=self.reset_average_var).grid(row=1, column=1, sticky="w", pady=2)
-        ttk.Label(stats_frame, text="Минимальный интервал:").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=2)
-        ttk.Label(stats_frame, textvariable=self.reset_min_var).grid(row=2, column=1, sticky="w", pady=2)
-        ttk.Label(stats_frame, text="Максимальный интервал:").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=2)
-        ttk.Label(stats_frame, textvariable=self.reset_max_var).grid(row=3, column=1, sticky="w", pady=2)
-        ttk.Label(stats_frame, text="Последние 10 подтверждённых обнулений:").grid(
-            row=4,
-            column=0,
-            columnspan=2,
-            sticky="w",
-            pady=(8, 4),
-        )
-
-        self.history_table = ttk.Treeview(
-            stats_frame,
-            columns=("index", "time", "peak", "interval"),
-            show="headings",
-            height=10,
-        )
-        self.history_table.heading("index", text="№")
-        self.history_table.heading("time", text="Время обнуления")
-        self.history_table.heading("peak", text="Пик перед обнулением")
-        self.history_table.heading("interval", text="Интервал от предыдущего")
-        self.history_table.column("index", width=50, anchor="center", stretch=False)
-        self.history_table.column("time", width=180, anchor="center", stretch=False)
-        self.history_table.column("peak", width=170, anchor="center", stretch=False)
-        self.history_table.column("interval", width=220, anchor="w")
-        self.history_table.grid(row=5, column=0, columnspan=2, sticky="ew")
-        self.history_table.insert("", "end", iid="placeholder", values=("—", "—", "—", "пока нет данных"))
-
-        history_actions = ttk.Frame(stats_frame)
-        history_actions.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        self.delete_history_button = ttk.Button(
-            history_actions,
-            text="Удалить выбранную запись",
-            command=self.delete_selected_history_entry,
-        )
-        self.delete_history_button.pack(side="left")
-        self.clear_history_button = ttk.Button(
-            history_actions,
-            text="Очистить всю историю",
-            command=self.clear_all_history,
-        )
-        self.clear_history_button.pack(side="left", padx=(8, 0))
+        from app.ui_design import FountainDesign
+        self.design = FountainDesign(self)
 
     def _bind_hotkeys(self) -> None:
+        self.root.bind("<Control-o>", lambda _event: self.choose_window())
         self.root.bind("<F8>", lambda _event: self.toggle())
         self.root.bind("<F9>", lambda _event: self.emergency_stop())
 
     def _sync_mode(self) -> None:
+        if self._switching_window or self._window_picker_active or self._selection_error:
+            self.mode_var.set(False)
+            return
         enabled = self.mode_var.get()
         if enabled:
             active_range = self.monitor.target_range_label()
             approved = messagebox.askyesno(
                 "Подтверждение реального режима",
                 "Будет включён реальный режим.\n"
+                + ("Окна: " + ', '.join(s.window.name for s in self._group.sessions.values()) + ".\n"
+                   if self._group else "")
+                +
                 f"Активный диапазон: {active_range}.\n"
-                "Каждый настоящий tap расходует игровую валюту.\n"
-                "Продолжить?",
+                "Диапазон запускает серию; рост выше максимума не останавливает её.\n"
+                "При обнулении клики прекращаются. При долгой потере цифр серия ждёт.\n"
+                + (f"Предел одной серии: {self.config.continuous_max_taps} желаний.\n" if self.config.continuous_max_taps else
+                 "Серия без числового лимита: до падения фонда или защитной остановки.\n")
+                + "Каждое желание расходует 100 самоцветов. F9 — остановка.\n"
+                + (f"Сохранить на счёте не меньше {self.monitor.user_range.minimum_gems:,} самоцветов.\n".replace(',',' ')
+                   if self.monitor.user_range.minimum_gems is not None else "Ограничение остатка самоцветов не включено.\n")
+                + "Продолжить?",
                 icon="warning",
             )
             if not approved:
                 self.mode_var.set(False)
                 enabled = False
-        _changed, message = self.monitor.set_real_mode(enabled)
-        self.mode_var.set(self.monitor.state.real_mode_armed)
+        _changed, message = (self._group.set_real_mode(enabled) if self._group else self.monitor.set_real_mode(enabled))
+        self.mode_var.set(self._group.any_real if self._group else self.monitor.state.real_mode_armed)
         self.mode_label_var.set("Реальный режим" if self.monitor.state.real_mode_armed else "Тестовый режим")
         self.mode_banner_var.set(self.monitor.mode_banner())
         self.range_var.set(f"Диапазон: {self.monitor.target_range_label()}")
@@ -420,40 +371,225 @@ class AppWindow:
         self.tap_policy_var.set(self.monitor.real_taps_label())
         if message:
             self._append_log(message)
+        if enabled and not _changed:
+            messagebox.showwarning("Режим не включён", message)
+        if enabled and _changed:
+            self.start()
+        elif self.running:
+            self.monitor.resume()
 
     def apply_range(self) -> None:
         try:
-            min_value = int(self.test_range_min_var.get().strip())
-            max_value = int(self.test_range_max_var.get().strip())
+            min_value = int(self.test_range_min_var.get().replace(" ", "").strip())
+            max_value = int(self.test_range_max_var.get().replace(" ", "").strip())
+            gem_floor = int(self.gem_floor_var.get().replace(" ", "").strip()) if self.gem_limit_enabled_var.get() else None
+            start_percent = int(self.start_percent_var.get().strip())
         except ValueError:
-            messagebox.showerror("Ошибка диапазона", "Минимальное и максимальное значения должны быть целыми числами.")
+            messagebox.showerror("Ошибка настроек", "Значения фонда, процент и остаток самоцветов должны быть целыми числами.")
             return
 
-        if self.monitor.state.real_mode_armed:
+        if self.mode_var.get():
+            range_text = (f"{start_percent}% от фонда перед последним обнулением" if self.start_method_var.get() == 'percent'
+                          else f"от {min_value:,}, без верхнего предела" if self.no_upper_var.get()
+                          else f"{min_value:,} - {max_value:,}")
             approved = messagebox.askyesno(
                 "Изменение диапазона в реальном режиме",
-                "Сейчас активен REAL MODE.\n"
-                f"Новый диапазон будет применён и в TEST MODE, и в REAL MODE.\n"
-                f"Новый диапазон: {min_value:,} - {max_value:,}.\n"
+                "Сейчас включены настоящие клики.\n"
+                f"Новый диапазон: {range_text}.\n".replace(',',' ')
+                + (f"Оставить на счёте не меньше {gem_floor:,} самоцветов.\n".replace(',',' ') if gem_floor is not None else "Ограничение остатка выключено.\n")
+                +
                 "Продолжить?",
                 icon="warning",
             )
             if not approved:
                 return
 
-        ok, message = self.monitor.update_test_range(min_value, max_value)
+        ok, message = self.monitor.update_test_range(min_value, max_value,
+            no_upper_limit=self.no_upper_var.get(), minimum_gems=gem_floor, update_gem_limit=True,
+            start_method=self.start_method_var.get(), start_percent=start_percent)
         if not ok:
             messagebox.showerror("Ошибка диапазона", message)
             return
+        if self._group:
+            self._group.update_settings(self.monitor.user_range)
 
         self.range_var.set(f"Диапазон: {self.monitor.target_range_label()}")
         self.active_range_var.set(self.monitor.target_range_label())
         self._append_log(message)
+        if hasattr(self, 'design'):
+            self.design.mark_saved()
 
     def _connect(self) -> None:
+        if self._selection_error:
+            self.connection_var.set(self._selection_error)
+            return
         ok, message = self.monitor.connect()
         self.connection_var.set("Подключено" if ok else f"Ошибка: {message}")
         self._append_log(message)
+
+    def choose_window(self) -> None:
+        if self._switching_window or self._window_picker_active:
+            return
+        self._window_picker_active = True
+        from app.window_picker import WindowPicker
+        serials = [s.window.serial for s in self._group.sessions.values()] if self._group else [self.config.adb_serial]
+        picker = WindowPicker(self.root, self._base_config.adb_path, serials, self._select_windows)
+        def dismissed(event):
+            if event.widget is picker:
+                self._window_picker_active = False
+        picker.bind('<Destroy>', dismissed)
+
+    def open_program_window(self) -> None:
+        profile = uuid.uuid4().hex
+        try:
+            subprocess.Popen([sys.executable, '-m', 'app.ui', '--profile', profile],
+                             cwd=str(Path(__file__).resolve().parents[1]),
+                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except OSError as exc:
+            messagebox.showerror('Не удалось открыть окно', str(exc), parent=self.root)
+
+    def _select_windows(self, windows) -> None:
+        current = {(w.uuid, w.serial) for w in self._selected_windows}
+        selected = {(w.uuid, w.serial) for w in windows}
+        if current == selected:
+            return
+        self._switching_window = True
+        self._warmup_start_requested = False
+        self.pause()
+        self.status_var.set('Переключаем окно. Платные клики выключены…')
+        def wait_for_poll():
+            if getattr(self, '_window_close_started', False):
+                return
+            if ((self._poll_thread is not None and self._poll_thread.is_alive())
+                    or (self._warmup_thread is not None and self._warmup_thread.is_alive())
+                    or (self._cleanup_thread is not None and self._cleanup_thread.is_alive())):
+                self.root.after(30, wait_for_poll)
+                return
+            self._cleanup_thread = threading.Thread(target=self._close_monitors, name='kgpm-window-switch', daemon=True)
+            self._cleanup_thread.start()
+            self.root.after(30, finish)
+        def finish():
+            if getattr(self, '_window_close_started', False):
+                return
+            if self._cleanup_thread.is_alive():
+                self.root.after(30, finish)
+                return
+            from app.memu_windows import config_for_window, discover_windows, save_selections
+            try:
+                self._device_leases.release()
+                available = {w.uuid: w for w in discover_windows(self._base_config.adb_path)}
+                if any(w.uuid not in available for w in windows):
+                    raise RuntimeError('Одно из выбранных окон уже закрыто. Проверьте список окон.')
+                fresh = [available[w.uuid] for w in windows]
+                self._device_leases.acquire([identity for w in fresh for identity in (w.serial, 'device:' + w.uuid)])
+                self.config = config_for_window(self._base_config, fresh[0])
+                self.monitor = PrizeMonitor(self.config)
+                self._install_group(fresh, self.monitor)
+                self._selection_error = ''
+                self.window_label_var.set(fresh[0].name)
+                save_selections(self._selection_path, fresh)
+                self._update_group_table()
+                self._connect()
+                self._refresh_runtime_panels()
+                self._refresh_static_panels()
+                self.ocr_warmup_complete = False
+                self.ocr_warmup_error = None
+                self._start_ocr_warmup()
+                self._write_runtime_status()
+                self._append_log('Выбраны окна: ' + ', '.join(w.name for w in fresh) + '. Нажмите «Начать» для всех выбранных окон.')
+            except Exception as exc:
+                self._device_leases.release()
+                self._selection_error = str(exc)
+                self.status_var.set(str(exc))
+                messagebox.showerror('Выбор окна', str(exc), parent=self.root)
+            finally:
+                self._switching_window = False
+        wait_for_poll()
+
+    def _install_group(self, windows, primary):
+        from app.memu_windows import config_for_window
+        from app.monitor_group import MonitorGroup
+        entries = [(windows[0], primary)]
+        entries.extend((w, PrizeMonitor(config_for_window(self._base_config, w))) for w in windows[1:])
+        self._group = MonitorGroup(entries)
+        self._selected_windows = windows
+        self._selected_window = windows[0]
+        self._focus_uuid = windows[0].uuid
+        self._session_snapshots.clear()
+        self._session_statuses.clear()
+
+    def _close_monitors(self):
+        if self._group:
+            self._group.close()
+        else:
+            self.monitor.close()
+
+    def _focus_session(self, _event=None):
+        if self._group is None or self._switching_window:
+            return
+        index = self.group_picker.current()
+        selected = [self._group_picker_ids[index]] if 0 <= index < len(self._group_picker_ids) else []
+        if not selected or selected[0] not in self._group.sessions:
+            return
+        session = self._group.sessions[selected[0]]
+        self._focus_uuid = selected[0]
+        self.monitor = session.monitor
+        self.config = session.monitor.config
+        self.window_label_var.set(session.window.name)
+        self._last_transition = None
+        snapshot = self._session_snapshots.get(selected[0])
+        if snapshot:
+            self._apply_snapshot(snapshot)
+        else:
+            self._refresh_runtime_panels()
+            self._refresh_static_panels()
+        self.mode_var.set(self._group.any_real)
+
+    def _update_group_table(self):
+        if not hasattr(self, 'group_picker'):
+            return
+        sessions = self._group.sessions if self._group else {}
+        self._group_picker_ids = list(sessions)
+        self.group_picker.configure(values=[s.window.name for s in sessions.values()])
+        if self._focus_uuid in self._group_picker_ids:
+            self.group_picker.current(self._group_picker_ids.index(self._focus_uuid))
+        if sessions:
+            self.group_frame.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(4,0))
+        else:
+            self.group_frame.grid_remove()
+
+    def _collect_group(self):
+        if self._group and not self._switching_window:
+            import queue
+            for _ in range(128):
+                try:
+                    uuid, kind, payload = self._group.events.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == 'snapshot':
+                    self._session_snapshots[uuid] = payload
+                    self._session_statuses.pop(uuid, None)
+                    if uuid == self._focus_uuid and self._group.sessions[uuid].active.is_set():
+                        self._apply_snapshot(payload)
+                    elif uuid != self._focus_uuid:
+                        for event in payload.tap_events:
+                            self._append_log(f'[{self._group.sessions[uuid].window.name}] {event}')
+                else:
+                    self._session_statuses[uuid] = ('Ошибка подключения: ' if kind == 'error' else '') + payload
+                    if kind == 'reset':
+                        self._session_snapshots.pop(uuid, None)
+                        if uuid == self._focus_uuid:
+                            self._refresh_runtime_panels()
+                            self._refresh_static_panels()
+                    if kind == 'error':
+                        self._append_log(f'[{self._group.sessions[uuid].window.name}] {payload}')
+            self.running = self._group.any_active
+            self.mode_var.set(self._group.any_real)
+            self._update_group_table()
+            if time.monotonic()-self._last_status_write > 1:
+                self._last_status_write = time.monotonic()
+                self._write_runtime_status()
+        self.root.after(100, self._collect_group)
 
     def _append_log(self, text: str) -> None:
         timestamp = self.monitor.timestamp()
@@ -465,20 +601,20 @@ class AppWindow:
             self.paned.forget(self.log_panel)
             self.logs_visible = False
             self.log_toggle_var.set("Показать логи")
-            self.root.minsize(1100, 980)
+            self.root.minsize(840, 760)
             self.root.geometry(f"{self._closed_window_width}x{self.root.winfo_height()}")
             return
 
-        self._closed_window_width = max(1100, self.root.winfo_width())
+        self._closed_window_width = max(840, self.root.winfo_width())
         self.paned.add(self.log_panel, weight=0)
         self.logs_visible = True
         self.log_toggle_var.set("Скрыть логи")
-        target_width = max(1500, self._closed_window_width + 500)
-        self.root.minsize(1500, 980)
+        target_width = self._closed_window_width + 380
+        self.root.minsize(1220, 760)
         self.root.geometry(f"{target_width}x{self.root.winfo_height()}")
         self.root.update_idletasks()
         try:
-            self.paned.sashpos(0, max(1000, target_width - 500))
+            self.paned.sashpos(0, self._closed_window_width)
         except tk.TclError:
             pass
 
@@ -498,10 +634,20 @@ class AppWindow:
         for item in self.history_table.get_children():
             self.history_table.delete(item)
         if not rows:
-            self.history_table.insert("", "end", iid="placeholder", values=("—", "—", "—", "пока нет данных"))
+            self.history_table.insert("", "end", iid="placeholder", values=("", "", "", ""))
+            if hasattr(self,'design'):
+                self.design.update_empty_history()
             return
         for index, row in enumerate(rows):
-            self.history_table.insert("", "end", iid=f"event-{index}", values=row)
+            row = list(row)
+            if str(row[2]).isdigit():
+                row[2] = f"{int(row[2]):,}".replace(",", " ")
+            if index == 0 and hasattr(self, 'design'):
+                row[1] = f"●  {row[1]}"
+            self.history_table.insert("", "end", iid=f"event-{index}", values=row,
+                                      tags=("newest",) if index == 0 else ())
+        if hasattr(self,'design'):
+            self.design.update_empty_history()
 
     def delete_selected_history_entry(self) -> None:
         selection = self.history_table.selection()
@@ -565,6 +711,8 @@ class AppWindow:
 
     def _refresh_static_panels(self) -> None:
         now = self.monitor._now()
+        self.mode_var.set(self._group.any_real if self._group else self.monitor.state.real_mode_armed)
+        self.mode_label_var.set("Реальный режим" if self.monitor.state.real_mode_armed else "Тестовый режим")
         self.last_reset_var.set(self.monitor._format_reset_time())
         self.since_reset_var.set(self.monitor._format_since_reset_label(now))
         self.cooldown_var.set(
@@ -580,7 +728,8 @@ class AppWindow:
             self.active_range_var.set(self.monitor.target_range_label())
         self.tap_policy_var.set(self.monitor.real_taps_label())
         avg_label, min_label, max_label = self.monitor._history_stats()
-        self.reset_since_var.set(self.monitor._history_since_reset_label(now))
+        self.reset_since_var.set('' if self.monitor.state.manual_reset_block_real_taps else
+                                 self.monitor._history_since_reset_label(now))
         self.reset_average_var.set(avg_label)
         self.reset_min_var.set(min_label)
         self.reset_max_var.set(max_label)
@@ -603,7 +752,7 @@ class AppWindow:
             else "—"
         )
         self.active_burst_var.set(str(self.monitor.state.burst_taps_done))
-        self.total_taps_var.set(str(self.monitor.state.total_taps))
+        self.total_taps_var.set(f"{self.monitor.state.real_taps} / {self.monitor.state.virtual_taps}")
         self.mode_banner_var.set(self.monitor.mode_banner())
         self.range_var.set(f"Диапазон: {self.monitor.target_range_label()}")
         if self.monitor.state.test_mode:
@@ -613,13 +762,50 @@ class AppWindow:
         self.tap_policy_var.set(self.monitor.real_taps_label())
 
     def _apply_snapshot(self, snapshot: PollSnapshot) -> None:
-        self.value_var.set(str(snapshot.value) if snapshot.value is not None else "—")
+        self.mode_var.set(self._group.any_real if self._group else self.monitor.state.real_mode_armed)
+        self.value_var.set(f"{snapshot.value:,}".replace(",", " ") if snapshot.value is not None else "—")
+        transition = (snapshot.phase.value, snapshot.notification_veto, snapshot.event_screen_ok,
+                      snapshot.button_visible, snapshot.in_range, self.monitor.state.real_mode_armed)
+        if transition != self._last_transition:
+            self._last_transition = transition
+            with (self.monitor.config.runtime_dir/'monitor_events.jsonl').open('a', encoding='utf-8') as log:
+                log.write(json.dumps(dict(timestamp=datetime.now().astimezone().isoformat(),
+                          phase=snapshot.phase.value, value=snapshot.trusted_value, status=snapshot.status,
+                          screen_ok=snapshot.event_screen_ok, button_ok=snapshot.button_visible,
+                          notification=snapshot.notification_veto, real_mode=self.monitor.state.real_mode_armed,
+                          real_taps=self.monitor.state.real_taps), ensure_ascii=False) + '\n')
+        if time.monotonic() - self._last_status_write > 1:
+            self._last_status_write = time.monotonic()
+            self._write_runtime_status()
         self.ocr_var.set(self._user_visible_ocr_text(snapshot))
-        self.status_var.set(snapshot.status)
+        reason = snapshot.status
+        if snapshot.recognition.method == "popup":
+            reason = "Мешающее окно: закрываем крестиком и ждём экран желаний."
+        elif snapshot.phase == MonitorPhase.ACTIVE_CLICKING and self.config.continuous_clicking:
+            reason = snapshot.status
+        elif snapshot.notification_veto:
+            reason = "Ждём окончания уведомления. Продолжим автоматически после подтверждения цифр."
+        elif not snapshot.event_screen_ok or not snapshot.button_visible:
+            reason = "Откройте экран желания. Нужны надписи фонда, счётчика и кнопки. Проверьте разрешение MEmu: 1080 × 1080."
+        elif snapshot.trusted_value is None:
+            reason = "Ждём, пока цифры станут видны. Продолжим автоматически после подтверждения."
+        elif snapshot.phase == MonitorPhase.RESET_COOLDOWN:
+            reason = f"После обнуления: осталось {snapshot.cooldown_remaining} сек. Затем продолжим автоматически."
+        elif snapshot.phase == MonitorPhase.RESET_TIME_UNKNOWN:
+            reason = "Первые 120 секунд наблюдаем после перерыва. Затем работа начнётся автоматически."
+        elif not snapshot.in_range:
+            reason = f"Ждём входа фонда в диапазон {snapshot.target_range_label}."
+        elif snapshot.phase == MonitorPhase.WAITING or snapshot.phase == MonitorPhase.CANDIDATE:
+            reason = "Фонд в диапазоне. Подтверждаем по новым кадрам."
+        elif snapshot.phase == MonitorPhase.CHECKING_AFTER_BURST:
+            reason = "Проверяем фонд после серии. Окно остаётся открытым."
+        if snapshot.status.startswith("С кликами выключено:"):
+            reason = snapshot.status
+        self.status_var.set(reason)
         self.phase_var.set(snapshot.phase.value)
         self.confirmations_var.set(str(snapshot.confirmation_hits))
         self.screen_var.set(
-            f"{'подтверждён' if snapshot.event_screen_ok else 'не подтверждён'} "
+            f"{'подтверждён' if snapshot.event_screen_ok else 'подтверждён для серии' if snapshot.continuation_screen_ok else 'не подтверждён'} "
             f"(anchor={snapshot.screen_anchor_score:.2f})"
         )
         self.button_var.set(
@@ -630,7 +816,7 @@ class AppWindow:
         self.since_reset_var.set(snapshot.since_reset_label)
         self.cooldown_var.set(snapshot.cooldown_label)
         self.active_burst_var.set(str(snapshot.active_burst_taps))
-        self.total_taps_var.set(str(snapshot.total_taps))
+        self.total_taps_var.set(f"{self.monitor.state.real_taps} / {self.monitor.state.virtual_taps}")
         self.mode_banner_var.set(snapshot.mode_banner)
         self.range_var.set(f"Диапазон: {snapshot.target_range_label}")
         if self.monitor.state.test_mode:
@@ -638,7 +824,8 @@ class AppWindow:
         else:
             self.active_range_var.set(snapshot.target_range_label)
         self.tap_policy_var.set(snapshot.real_taps_label)
-        self.reset_since_var.set(snapshot.reset_since_history_label)
+        self.reset_since_var.set('' if self.monitor.state.manual_reset_block_real_taps else
+                                 snapshot.reset_since_history_label)
         self.reset_average_var.set(snapshot.reset_average_label)
         self.reset_min_var.set(snapshot.reset_min_label)
         self.reset_max_var.set(snapshot.reset_max_label)
@@ -733,12 +920,33 @@ class AppWindow:
             self.start()
 
     def start(self) -> None:
+        if self._switching_window or self._window_picker_active or self._selection_error or getattr(self, '_window_close_started', False):
+            self.status_var.set(self._selection_error or 'Сначала завершите выбор окна MEmu.')
+            return
         if self.running:
+            if self._group:
+                self._group.start()
+            return
+        if self._cleanup_thread is not None and self._cleanup_thread.is_alive():
+            self.root.after(100,self.start)
             return
         if not self.ocr_warmup_complete:
             self._warmup_start_requested = True
-            self.status_var.set("Прогрев RapidOCR и PaddleOCR...")
+            self.status_var.set("Готовим программу. Наблюдение начнётся автоматически после подготовки.")
             return
+        if self._group:
+            self._group.start()
+            self.running = True
+            self.status_var.set(f'Наблюдение запущено: {len(self._group.sessions)} окна. Получаем свежие значения…')
+            self._append_log('Наблюдение запущено во всех выбранных окнах')
+            self._write_runtime_status()
+            return
+        if self.config.stream_transport_enabled and self.monitor._stream is None:
+            ok,message=self.monitor.connect()
+            self.connection_var.set(message)
+            if not ok:
+                self.status_var.set(message)
+                return
         self.monitor.resume()
         self.running = True
         if self._acceptance_log_path is not None and self._acceptance_started_monotonic is None:
@@ -752,7 +960,11 @@ class AppWindow:
         self.status_var.set("Прогрев RapidOCR и PaddleOCR...")
 
         def worker() -> None:
+            diagnostic = None
             try:
+                diagnostic = (self.config.runtime_dir / 'startup_warmup.log').open('a', encoding='utf-8')
+                faulthandler.dump_traceback_later(20, file=diagnostic)
+                self.ocr_warmup_stage = 'Загружаем распознавание'
                 crop_path = self.config.prize_crop_path
                 if crop_path.exists():
                     crop = Image.open(crop_path).convert("RGB")
@@ -776,6 +988,10 @@ class AppWindow:
                 self.ocr_warmup_report = report
             except Exception as exc:
                 self.ocr_warmup_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                if diagnostic is not None:
+                    faulthandler.cancel_dump_traceback_later()
+                    diagnostic.close()
 
         self._warmup_thread = threading.Thread(target=worker, name="kgpm-ocr-warmup", daemon=True)
         self._warmup_thread.start()
@@ -783,6 +999,7 @@ class AppWindow:
 
     def _poll_ocr_warmup(self) -> None:
         if self._warmup_thread is not None and self._warmup_thread.is_alive():
+            self.status_var.set(self.ocr_warmup_stage)
             self.root.after(100, self._poll_ocr_warmup)
             return
         if self.ocr_warmup_error:
@@ -806,10 +1023,12 @@ class AppWindow:
             self.start()
 
     def _write_runtime_status(self) -> None:
-        path = Path("runtime/gui_runtime_status.json")
+        path = getattr(self, '_base_config', self.config).runtime_dir / "gui_runtime_status.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "pid": os.getpid(),
+            "selected_window": self.window_label_var.get(),
+            "adb_serial": self.config.adb_serial,
             "python": sys.executable,
             "title": self.root.title(),
             "hwnd": int(self.root.winfo_id()),
@@ -818,53 +1037,91 @@ class AppWindow:
             "ocr_warmup_complete": self.ocr_warmup_complete,
             "ocr_warmup_error": self.ocr_warmup_error,
             "ocr_warmup": self.ocr_warmup_report,
+            "ocr_warmup_stage": getattr(self, 'ocr_warmup_stage', ''),
+            "ocr_warmup_thread_alive": bool(self._warmup_thread and self._warmup_thread.is_alive()),
             "test_mode": self.monitor.state.test_mode,
             "real_mode_armed": self.monitor.state.real_mode_armed,
             "tap_decisions_enabled": self.monitor.tap_decisions_enabled,
+            "project_root": str(Path.cwd()),
+            "profile": getattr(self, 'profile', 'default'),
+            "running": self.running,
+            "global_f8": getattr(self, 'global_f8', False),
+            "global_f9": getattr(self, 'global_f9', False),
+            "phase": self.monitor.state.phase.value,
+            "trusted_value": self.monitor.state.trusted_value,
+            "real_taps": self.monitor.state.real_taps,
+            "virtual_taps": self.monitor.state.virtual_taps,
+            "range": self.monitor.target_range_for_mode(),
+            "status": self.monitor.state.last_status,
+            "windows": [{"name": s.window.name, "serial": s.window.serial,
+                         "running": s.active.is_set(), "real_mode_armed": s.monitor.state.real_mode_armed,
+                         "value": s.monitor.state.last_value, "phase": s.monitor.state.phase.value,
+                         "real_taps": s.monitor.state.real_taps, "virtual_taps": s.monitor.state.virtual_taps,
+                         "worker_alive": bool(s.thread and s.thread.is_alive()),
+                         "status": s.monitor.state.last_status,
+                         "last_error": s.last_error,
+                         "fund_source": s.fund_source}
+                        for s in self._group.sessions.values()] if self._group else [],
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def pause(self) -> None:
         self.running = False
-        self.monitor.pause()
+        if self._group:
+            self._group.pause()
+        else:
+            self.monitor.set_real_mode(False)
+            self.monitor.pause()
+            self.monitor.adb.close_shell()
+        self._refresh_static_panels()
         self.status_var.set(self.monitor.state.last_status)
         self.phase_var.set(self.monitor.state.phase.value)
         self._append_log(self.monitor.state.last_status)
+        self._write_runtime_status()
 
     def reset_lock(self) -> None:
-        if self.monitor.state.real_mode_armed:
-            approved = messagebox.askyesno(
-                "Сбросить текущее состояние",
-                "Сброс текущего состояния удалит информацию о последнем обнулении и текущем cooldown.\n\n"
-                "Чтобы исключить преждевременные реальные клики, после сброса реальные tap останутся "
-                "заблокированы до нового достоверно обнаруженного обнуления.\n\n"
-                "Продолжить?",
-                icon="warning",
-            )
-        else:
-            approved = messagebox.askyesno(
-                "Сбросить текущее состояние",
-                "Сбросить текущее состояние монитора?\n\n"
-                "Будут очищены:\n"
-                "- текущее распознанное значение;\n"
-                "- текущий пик;\n"
-                "- время последнего reset;\n"
-                "- cooldown;\n"
-                "- внутреннее состояние текущего цикла.\n\n"
-                "Production-история обнулений останется без изменений.",
-                icon="warning",
-            )
+        approved = messagebox.askyesno(
+            'Ждать новое обнуление',
+            'Начать новый период наблюдения для всех выбранных окон?\n\n'
+            'Текущие показания и таймер будут сброшены. Кликов не будет до нового '
+            'обнуления и окончания двухминутного ожидания.\n\n'
+            'История и сохранённые настройки останутся. Эта кнопка не обнуляет фонд в игре.',
+            icon='question',
+        )
         if not approved:
             return
+        self.reset_since_var.set('')
+        self.mode_var.set(False)
+        if self._group:
+            self._session_snapshots.clear()
+            self._group.reset_cycle()
+            self.status_var.set('Сбрасываем текущий период во всех выбранных окнах…')
+            self._append_log('Ждём новое обнуление во всех выбранных окнах. История сохранена.')
+            return
+        self.monitor.set_real_mode(False)
         self.monitor.reset_lock()
+        self.monitor.state.reset_time_known = False
+        self.monitor.state.manual_reset_block_real_taps = True
+        self.monitor.state.unknown_since = self.monitor._now()
+        self.monitor.state.phase = MonitorPhase.RESET_TIME_UNKNOWN
+        self.monitor.state.last_status = 'Ждём новое обнуление. История сохранена, клики выключены.'
+        self.monitor._save_persisted_state()
         self._refresh_runtime_panels()
         self._refresh_static_panels()
         self._append_log(self.monitor.state.last_status)
 
     def emergency_stop(self) -> None:
         self.running = False
-        self.monitor.emergency_stop()
-        self.monitor.close()
+        if self._group:
+            self._group.emergency_stop()
+        else:
+            self.monitor.emergency_stop()
+        if self._cleanup_thread is None or not self._cleanup_thread.is_alive():
+            self._cleanup_thread=threading.Thread(target=self._close_monitors,name='kgpm-cleanup',daemon=True)
+            self._cleanup_thread.start()
+        self.monitor.state.last_status = "Аварийная остановка (F9). Реальный режим выключен."
+        self._refresh_static_panels()
+        self._write_runtime_status()
         self.status_var.set(self.monitor.state.last_status)
         self.phase_var.set(self.monitor.state.phase.value)
         self._append_log("Аварийная остановка (F9)")
@@ -872,33 +1129,85 @@ class AppWindow:
     def _schedule_tick(self) -> None:
         if not self.running:
             return
-        self._tick()
-        delay_ms = poll_delay_ms(self.monitor.state.phase, self.config.poll_interval_ms)
-        self.root.after(delay_ms, self._schedule_tick)
+        if self._poll_thread is not None:
+            return
+        self._poll_result = self._poll_error = None
+        def worker() -> None:
+            try:
+                self._poll_result = self.monitor.poll_once()
+            except Exception as exc:
+                self._poll_error = exc
+        self._poll_thread = threading.Thread(target=worker,name='kgpm-monitor-poll',daemon=True)
+        self._poll_thread.start()
+        self.root.after(10,self._collect_poll)
 
-    def _tick(self) -> None:
-        try:
-            snapshot = self.monitor.poll_once()
-        except Exception as exc:
+    def _collect_poll(self) -> None:
+        if self._poll_thread is not None and self._poll_thread.is_alive():
+            self.root.after(10,self._collect_poll)
+            return
+        self._poll_thread = None
+        if not self.running:
+            if self.monitor.state.phase != MonitorPhase.EMERGENCY_STOP:
+                self.monitor.pause()
+            return
+        if self._poll_error is not None:
+            if isinstance(self._poll_error,FreshFrameUnavailable):
+                self.monitor.state.next_click_at=None
+                self.status_var.set("Нажатия приостановлены: восстанавливается свежий видеопоток")
+                self.root.after(100,self._schedule_tick)
+                return
+            self.pause()
             self.status_var.set("Ошибка мониторинга")
-            self._append_log(f"Ошибка: {exc}")
+            self._append_log(f"Ошибка: {self._poll_error}")
+            messagebox.showerror("Мониторинг приостановлен", str(self._poll_error))
+            return
+        snapshot = self._poll_result
+        if snapshot is None:
             return
         self._apply_snapshot(snapshot)
+        if snapshot.phase in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}:
+            self.running = False
+            self._refresh_static_panels()
+        if self.running:
+            self.root.after(poll_delay_ms(snapshot.phase,self.config.poll_interval_ms),self._schedule_tick)
 
 
 def main() -> None:
-    config = AppConfig()
-    manager = SingleInstanceManager(config.instance_state_path)
+    from app.profiles import profile_config, profile_mutex
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--profile', default='default')
+    args = parser.parse_args()
+    config = profile_config(AppConfig(), args.profile)
+    manager = SingleInstanceManager(config.instance_state_path, profile_mutex(args.profile))
     manager = _start_or_focus_existing_instance(config, manager)
     if manager is None:
         return
 
     root = tk.Tk()
     style = ttk.Style(root)
-    if "vista" in style.theme_names():
-        style.theme_use("vista")
+    style.theme_use("clam")
+    style.configure(".", font=("Segoe UI", 10), background="#f5f2e9", foreground="#263d39")
+    style.configure("TFrame", background="#f5f2e9")
+    style.configure("TLabel", background="#f5f2e9")
+    style.configure("TLabelframe", background="#f5f2e9", bordercolor="#cdd5cb")
+    style.configure("TLabelframe.Label", foreground="#126a5b", font=("Segoe UI", 10, "bold"))
+    style.configure("Brand.TLabel", foreground="#126a5b", font=("Segoe UI", 10, "bold"))
+    style.configure("Heading.TLabel", font=("Segoe UI", 23, "bold"))
+    style.configure("Fund.TLabel", foreground="#126a5b", font=("Segoe UI", 22, "bold"))
+    style.configure("Hint.TLabel", foreground="#63716b", font=("Segoe UI", 9))
+    style.configure("TButton", padding=(10, 7))
+    style.configure("Accent.TButton", background="#126a5b", foreground="white")
+    style.map("Accent.TButton", background=[("active", "#218672")])
+    style.configure("Treeview", background="#fffdf6", fieldbackground="#fffdf6", rowheight=25)
+    style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
 
-    app = AppWindow(root)
+    app = AppWindow(root, config, args.profile)
+    from app.hotkeys import SharedHotkeys
+    hotkeys = SharedHotkeys(root, app.toggle, app.emergency_stop, AppConfig().runtime_dir / 'hotkey_commands')
+    app.global_f8 = hotkeys.keys[0].registered
+    app.global_f9 = hotkeys.keys[1].registered
+    app._append_log('F8 запускает и приостанавливает все окна программы; F9 останавливает все окна. '
+                    'Если клавиша занята посторонней программой, используйте кнопки в окне.')
     root.deiconify()
     root.update_idletasks()
     root.update()
@@ -907,9 +1216,25 @@ def main() -> None:
     app._write_runtime_status()
 
     def on_close() -> None:
-        app.monitor.close()
-        manager.release()
-        root.destroy()
+        app.running = False
+        if app._group:
+            app._group.pause()
+        app.monitor._tap_cancel.set()
+        if app._poll_thread is not None and app._poll_thread.is_alive():
+            root.after(20,on_close)
+            return
+        if app._cleanup_thread is None or not app._cleanup_thread.is_alive():
+            if getattr(app,'_window_close_started',False):
+                app._device_leases.release()
+                manager.release()
+                root.destroy()
+                return
+            app._window_close_started=True
+            hotkeys.close()
+            app._cleanup_thread=threading.Thread(target=app._close_monitors,name='kgpm-cleanup',daemon=True)
+            app._cleanup_thread.start()
+        app.status_var.set("Завершение записи диагностики. Настоящие нажатия выключены.")
+        root.after(20,on_close)
 
     app.close_callback = on_close
     root.protocol("WM_DELETE_WINDOW", on_close)

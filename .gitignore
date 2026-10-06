@@ -6,6 +6,8 @@ __pycache__/
 *.pyo
 .pytest_cache/
 .model_cache/
+dist/
+build/
 
 # Local application state and diagnostics
 runtime/

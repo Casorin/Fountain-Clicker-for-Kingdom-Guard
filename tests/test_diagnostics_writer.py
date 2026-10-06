@@ -39,7 +39,7 @@ class DiagnosticsWriterTests(unittest.TestCase):
             def copy(self):
                 return self
 
-            def save(self, path: Path) -> None:
+            def save(self, path: Path, **kwargs) -> None:
                 started.set()
                 release.wait(timeout=2.0)
                 path.write_bytes(b"image")

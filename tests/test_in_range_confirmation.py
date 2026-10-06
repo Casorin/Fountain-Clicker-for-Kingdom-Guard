@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import tempfile
 import unittest
+import threading
 
 from PIL import Image
 
@@ -60,6 +61,12 @@ class InRangeConfirmationTests(unittest.TestCase):
         root = Path(self.temp_dir.name)
         self.now = datetime(2026, 7, 16, 12, 0, 0)
         self.monitor = object.__new__(PrizeMonitor)
+        self.monitor._tap_cancel = threading.Event()
+        self.monitor._stream = None
+        from app.popup_dismissal import PopupDismissal
+        self.monitor._popup_dismissal = PopupDismissal()
+        self.monitor._current_popup = None
+        self.monitor._stream_sequence = -1
         self.monitor.config = AppConfig(
             runtime_dir=root,
             state_path=root / "state.json",
@@ -69,6 +76,7 @@ class InRangeConfirmationTests(unittest.TestCase):
             trigger_dir=root / "triggers",
             test_mode_min_prize=100_000,
             test_mode_max_prize=200_000,
+            continuous_clicking=False,
         )
         self.monitor.state = MonitorState(
             phase=MonitorPhase.WAITING,

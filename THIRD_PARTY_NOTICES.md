@@ -1,6 +1,12 @@
 # Third-party components
 
-Dependencies are installed from PyPI and are not vendored in this repository.
+Python dependencies are installed from PyPI. The pinned official scrcpy server is
+bundled in assets/scrcpy with its Apache-2.0 license.
+
+The portable Windows archive also includes the CPython runtime (PSF License;
+see .python/LICENSE.txt), Tcl/Tk from that Python distribution, dependency
+license files in .python/Lib/site-packages, and the PaddleX recognition model.
+Local runtime data, account selections, and user diagnostics are not distributed.
 
 | Component | Version | License |
 |---|---:|---|
@@ -12,6 +18,11 @@ Dependencies are installed from PyPI and are not vendored in this repository.
 | Pillow | 12.3.0 | MIT-CMU |
 | OpenCV Python | 5.0.0.93 (transitive) | Apache-2.0 and bundled notices |
 | OpenCV contrib Python | 4.10.0.84 (transitive) | Apache-2.0 and bundled notices |
+| PyAV | 19.0.1 | BSD-3-Clause and bundled FFmpeg notices |
+| scrcpy server | 4.1 | Apache-2.0 |
+
+scrcpy server source: https://github.com/Genymobile/scrcpy/tree/v4.1
+Release SHA256: deacb991ed2509715160ffdc7907e47b4160eb30d1566217e9047fd5b8850cae
 
 RapidOCR's recognition model is installed with the RapidOCR package. The PaddleOCR
 `PP-OCRv6_medium_rec` ONNX model is downloaded by the dependency installer into

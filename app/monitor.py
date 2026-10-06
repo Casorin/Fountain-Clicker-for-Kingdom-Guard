@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
@@ -10,10 +10,13 @@ from collections import deque
 import json
 import os
 import shutil
+import threading
+import time
 
 from PIL import Image
 
 from app.adb_client import AdbClient, AdbError
+from app.stream_transport import FreshFrameUnavailable
 from app.capture import crop_rect, save_screen
 from app.config import AppConfig
 from app.diagnostics_writer import DiagnosticsWriter
@@ -102,6 +105,8 @@ class MonitorState:
     manual_reset_block_real_taps: bool = False
     burst_taps_done: int = 0
     total_taps: int = 0
+    real_taps: int = 0
+    virtual_taps: int = 0
     next_click_at: datetime | None = None
     checking_until: datetime | None = None
     last_full_ocr_at: datetime | None = None
@@ -114,6 +119,10 @@ class MonitorState:
     notification_heavy: bool = False
     notification_recovery_hits: int = 0
     last_tap_sent_at: datetime | None = None
+    continuous_session_active: bool = False
+    session_last_visible_at: datetime | None = None
+    session_last_value: int | None = None
+    session_reset_suspected: bool = False
 
 
 @dataclass(frozen=True)
@@ -169,6 +178,7 @@ class PollSnapshot:
     notification_heavy: bool
     notification_recovery_hits: int
     paddle_control_ran: bool
+    continuation_screen_ok: bool = False
 
 
 class PrizeMonitor:
@@ -177,6 +187,12 @@ class PrizeMonitor:
         self.adb = AdbClient(config.adb_path, config.adb_serial)
         self._now_provider = now_provider or datetime.now
         self.state = MonitorState()
+        self._stream = None
+        self._stream_sequence = -1
+        self._tap_cancel = threading.Event()
+        from app.popup_dismissal import PopupDismissal
+        self._popup_dismissal = PopupDismissal()
+        self._current_popup = None
         self.state.test_range_override_enabled = config.test_range_override_enabled
         self.user_range = UserRangeConfig.load(
             self.config.user_config_path,
@@ -187,18 +203,26 @@ class PrizeMonitor:
         self.recent_observations: deque[dict[str, object]] = deque(maxlen=40)
         self.recent_prize_crops: deque[Image.Image] = deque(maxlen=5)
         self._latest_screen: Image.Image | None = None
+        self._latest_native_screen = None
+        self._screen_geometry = None
         self._latest_prize_crop: Image.Image | None = None
         self._latest_capture_completed_at: datetime | None = None
         self._last_production_ocr: ProductionOcrResult | None = None
         self._post_burst_paddle_pending = False
         self._diagnostics_writer = DiagnosticsWriter(max_queue_size=20)
         self._last_diagnostics_enqueue_accepted = True
+        self._last_full_diagnostics_at = None
         self._ocr_pipeline = ProductionOcrPipeline(
             engines=ProductionOcrEngines(),
             notification_tracker=NotificationVetoTracker(config.notification_dark_ratio_threshold),
             compatible_growth=config.realistic_growth_slack,
         )
+        from app.gem_guard import GemGuard
+        self.gem_guard = GemGuard(self._ocr_pipeline.engines)
+        self._async_wallet = True
         self.tap_decisions_enabled = os.environ.get("KGPM_DISABLE_TAP_DECISIONS", "0") != "1"
+        self._percentage_reference_after = None
+        self._last_observation_at = None
         self._load_persisted_state()
 
     def _now(self) -> datetime:
@@ -226,6 +250,12 @@ class PrizeMonitor:
         self.state.reset_episode_token = persisted.reset_episode_token
         self.state.last_recorded_reset_episode_token = persisted.last_recorded_reset_episode_token
         self.state.manual_reset_block_real_taps = persisted.manual_reset_block_real_taps
+        if self.state.last_trusted_at and now.timestamp() - self.state.last_trusted_at.timestamp() > self.config.observation_gap_seconds:
+            self._discard_stale_observation(now)
+        latest_reset = self._latest_percentage_reset()
+        if latest_reset is not None and now.timestamp() - datetime.fromisoformat(latest_reset.timestamp_reset).timestamp() >= 1800:
+            self._percentage_reference_after = now
+            self._discard_stale_observation(now)
         if (
             self.state.reset_episode_locked
             and self.state.post_reset_baseline is None
@@ -250,6 +280,37 @@ class PrizeMonitor:
             self.state.phase = MonitorPhase.WAITING
         else:
             self.state.phase = MonitorPhase.RESET_TIME_UNKNOWN
+
+    def _discard_stale_observation(self, now: datetime) -> None:
+        # A gap is not evidence of a reset. Keep history/deadlines, discard only
+        # the old live comparison baseline and restart the observation period.
+        self.state.continuous_session_active = False
+        self.state.last_confirmed_prize = None
+        self.state.last_trusted_at = None
+        self.state.peak_since_reset = None
+        self.state.post_reset_baseline = None
+        self.state.reset_growth_hits = 0
+        self.state.reset_growth_last_value = None
+        self.state.reset_growth_last_capture_id = None
+        self.state.reset_growth_last_at = None
+        self.state.reset_new_cycle_confirmed = False
+        self.state.reset_time_known = False
+        self.state.unknown_since = now
+        self.state.next_click_at = None
+        self.state.checking_until = None
+        self._clear_candidate()
+        self._clear_reset_candidate()
+        self.state.phase = MonitorPhase.RESET_TIME_UNKNOWN
+
+    def _expire_interrupted_observation(self, now: datetime) -> None:
+        previous_frame_at = getattr(self, '_last_observation_at', None)
+        last_trusted_at = self.state.last_trusted_at
+        interrupted = (previous_frame_at is not None and
+                       now.timestamp() - previous_frame_at.timestamp() > self.config.observation_gap_seconds)
+        expired = (last_trusted_at is not None and
+                   now.timestamp() - last_trusted_at.timestamp() >= 1800)
+        if interrupted or expired:
+            self._discard_stale_observation(now)
 
     def _save_persisted_state(self) -> None:
         PersistedState(
@@ -497,23 +558,56 @@ class PrizeMonitor:
 
         if self.config.adb_serial not in devices:
             return False, f"ADB подключён, но устройство {self.config.adb_serial} не видно"
+        if self.config.stream_transport_enabled:
+            from app.stream_transport import StreamTransport
+            self._stream = StreamTransport(self.adb, self.config.stream_server_path,
+                                           max_fps=getattr(self.config,'stream_max_fps',30),
+                                           max_size=getattr(self.config,'stream_max_size',0))
+            try:
+                self._stream.start()
+                self._stream_sequence = -1
+            except Exception as exc:
+                self._stream.close()
+                self._stream = None
+                return False, f"Видеопоток не запущен: {exc}"
         return True, connect_output or "Подключено"
 
     def set_real_mode(self, enabled: bool) -> tuple[bool, str]:
+        if not enabled:
+            self._tap_cancel.set()
+        else:
+            self._tap_cancel.clear()
+        if enabled and self.config.session_real_tap_limit and self.state.real_taps >= self.config.session_real_tap_limit:
+            return False, "Достигнут лимит настоящих нажатий за сеанс"
+        self._clear_candidate()
+        self.state.continuous_session_active = False
+        self.state.next_click_at = None
+        self.state.checking_until = None
+        self.state.burst_taps_done = 0
+        if self.state.phase in {MonitorPhase.ACTIVE_CLICKING, MonitorPhase.CANDIDATE, MonitorPhase.CONFIRMED, MonitorPhase.CHECKING_AFTER_BURST}:
+            self.state.phase = MonitorPhase.WAITING
         self.state.real_mode_armed = enabled
         self.state.test_mode = not enabled
         self.state.last_status = "Реальный режим включён" if enabled else "Тестовый режим включён"
         return True, self.state.last_status
 
     def pause(self) -> None:
+        self._tap_cancel.set()
+        self.state.continuous_session_active = False
+        self.state.next_click_at = None
         self.state.phase = MonitorPhase.PAUSED
         self.state.last_status = "Мониторинг приостановлен"
 
     def emergency_stop(self) -> None:
+        self.set_real_mode(False)
         self.state.phase = MonitorPhase.EMERGENCY_STOP
         self.state.last_status = "Аварийная остановка"
 
     def resume(self) -> None:
+        self._tap_cancel.clear()
+        writer = getattr(self, "_diagnostics_writer", None)
+        if writer is not None and not writer.is_alive:
+            self._diagnostics_writer = DiagnosticsWriter(max_queue_size=20)
         if self.state.phase in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}:
             self.state.phase = (
                 MonitorPhase.WAITING if self.state.reset_time_known else MonitorPhase.RESET_TIME_UNKNOWN
@@ -522,6 +616,7 @@ class PrizeMonitor:
 
     def reset_lock(self) -> None:
         now = self._now()
+        self.state.continuous_session_active = False
         self.state.last_value = None
         self.state.raw_ocr_value = None
         self.state.trusted_value = None
@@ -579,21 +674,63 @@ class PrizeMonitor:
 
     def target_range_for_mode(self, real_mode: bool | None = None) -> tuple[int, int]:
         _active_real_mode = self.state.real_mode_armed if real_mode is None else real_mode
-        return self.user_range.test_min_prize, self.user_range.test_max_prize
+        if self.user_range.start_method == "percent":
+            threshold = self.percentage_start_threshold()
+            return (threshold if threshold is not None else 2**63, 2**63-1)
+        return self.user_range.test_min_prize, (2**63-1 if self.user_range.no_upper_limit else self.user_range.test_max_prize)
+
+    def _latest_percentage_reset(self):
+        valid = []
+        for event in self.reset_history:
+            try:
+                stamp = datetime.fromisoformat(event.timestamp_reset).timestamp()
+            except (ValueError, TypeError):
+                continue
+            valid.append((stamp, event))
+        return max(valid, key=lambda item: item[0])[1] if valid else None
+
+    def percentage_start_threshold(self) -> int | None:
+        event = self._latest_percentage_reset()
+        if event is None or type(event.peak_before_reset) is not int or event.peak_before_reset <= 0:
+            return None
+        after = getattr(self, '_percentage_reference_after', None)
+        if after is not None and datetime.fromisoformat(event.timestamp_reset).timestamp() < after.timestamp():
+            return None
+        # Round up: never start below the selected percentage.
+        return (event.peak_before_reset * self.user_range.start_percent + 99) // 100
 
     def editable_test_range_label(self) -> str:
-        return f"{self.user_range.test_min_prize} - {self.user_range.test_max_prize}"
+        return self.target_range_label()
 
-    def update_test_range(self, min_value: int, max_value: int) -> tuple[bool, str]:
+    def update_test_range(self, min_value: int, max_value: int, *, no_upper_limit: bool | None = None,
+                          minimum_gems: int | None = None, update_gem_limit: bool = False,
+                          start_method: str | None = None, start_percent: int | None = None) -> tuple[bool, str]:
+        if start_method is not None and start_method not in {"range", "percent"}:
+            return False, "Выберите начало по диапазону или по проценту"
+        if start_percent is not None and (type(start_percent) is not int or not 1 <= start_percent <= 100):
+            return False, "Процент должен быть целым числом от 1 до 100"
         if min_value < 1000:
             return False, "Минимальное значение должно быть не меньше 1000"
         if max_value > 999_999:
             return False, "Максимальное значение должно быть не больше 999999"
-        if min_value >= max_value:
+        unlimited = self.user_range.no_upper_limit if no_upper_limit is None else no_upper_limit
+        if not unlimited and min_value >= max_value:
             return False, "Минимальное значение должно быть меньше максимального"
-        self.user_range = UserRangeConfig(test_min_prize=min_value, test_max_prize=max_value)
+        if update_gem_limit and minimum_gems is not None and (type(minimum_gems) is not int or minimum_gems < 0):
+            return False, "Остаток самоцветов должен быть целым неотрицательным числом"
+        self.user_range = replace(self.user_range, test_min_prize=min_value, test_max_prize=max_value,
+                                  no_upper_limit=self.user_range.no_upper_limit if no_upper_limit is None else no_upper_limit,
+                                  minimum_gems=minimum_gems if update_gem_limit else self.user_range.minimum_gems,
+                                  start_method=start_method or self.user_range.start_method,
+                                  start_percent=start_percent if start_percent is not None else self.user_range.start_percent)
         self.user_range.save(self.config.user_config_path)
-        self.state.last_status = f"Сохранён тестовый диапазон: {min_value} - {max_value}"
+        self.state.continuous_session_active = False
+        self._clear_candidate()
+        self.state.next_click_at = None
+        self.state.burst_taps_done = 0
+        if self.state.phase in {MonitorPhase.ACTIVE_CLICKING, MonitorPhase.CANDIDATE, MonitorPhase.CONFIRMED}:
+            self.state.phase = MonitorPhase.WAITING
+        self.state.last_status = f"Сохранено начало кликов: {self.target_range_label()}"
         return True, self.state.last_status
 
     def is_target_value(self, value: int, real_mode: bool | None = None) -> bool:
@@ -606,7 +743,14 @@ class PrizeMonitor:
         return "ТЕСТОВЫЙ РЕЖИМ"
 
     def target_range_label(self) -> str:
+        if self.user_range.start_method == "percent":
+            threshold = self.percentage_start_threshold()
+            if threshold is None:
+                return f"{self.user_range.start_percent}% · ждём новое обнуление"
+            return f"{self.user_range.start_percent}% · от {threshold:,}".replace(",", " ")
         lower, upper = self.target_range_for_mode()
+        if self.user_range.no_upper_limit:
+            return f"от {lower:,} · без верхнего предела".replace(",", " ")
         return f"{lower:,}–{upper:,}".replace(",", " ")
 
     def real_taps_label(self) -> str:
@@ -636,6 +780,7 @@ class PrizeMonitor:
                 "ocr_method": recognition.method,
                 "ocr_status": self.state.ocr_status.value,
                 "screen_ok": anchors.event_screen_ok,
+                "continuation_screen_ok": anchors.continuation_screen_ok,
                 "button_ok": anchors.button_visible,
                 "prefilter_status": prefilter.status,
                 "prefilter_reason": prefilter.reason,
@@ -886,6 +1031,10 @@ class PrizeMonitor:
                 reasons.append("suspicious_growth")
         return tuple(dict.fromkeys(reasons))
 
+    def _native_point(self, x, y):
+        geometry = getattr(self, '_screen_geometry', None)
+        return geometry.to_native(x, y) if geometry is not None else (x, y)
+
     def _capture_context(
         self,
         now: datetime,
@@ -893,16 +1042,74 @@ class PrizeMonitor:
         import time
 
         started_capture = time.perf_counter()
-        screen = save_screen(self.adb, self.config.screenshot_path, backend=self.config.capture_backend, save=False)
+        frame_age = 0.0
+        if self._stream is not None:
+            frame = self._stream.frame(after=self._stream_sequence)
+            self._stream_sequence = frame.sequence
+            screen = frame.image
+            frame_age = max(0.0,time.monotonic()-frame.received_at)
+        else:
+            screen = save_screen(self.adb, self.config.screenshot_path, backend=self.config.capture_backend, save=False)
         capture_ms = (time.perf_counter() - started_capture) * 1000.0
+        from app.screen_geometry import ScreenGeometry
+        geometry = ScreenGeometry(*screen.size)
+        if self._screen_geometry is not None and geometry != self._screen_geometry:
+            self._clear_candidate()
+            self.state.continuous_session_active = False
+            self.state.next_click_at = None
+            if self.state.phase in {MonitorPhase.CANDIDATE, MonitorPhase.CONFIRMED,
+                                    MonitorPhase.ACTIVE_CLICKING, MonitorPhase.CHECKING_AFTER_BURST}:
+                self.state.phase = MonitorPhase.WAITING
+            self.gem_guard.checked_at = -float('inf')
+            self.gem_guard.balance = self.gem_guard.estimated = None
+        self._latest_native_screen = screen.copy()
+        try:
+            screen = geometry.normalize(screen)
+        except ValueError as exc:
+            self.state.next_click_at = None
+            raise FreshFrameUnavailable(str(exc)) from exc
+        self._screen_geometry = geometry
+        anchor_config = replace(self.config, layout_template_dir=geometry.template_directory(self.config.layout_template_dir))
+        self._current_popup = self._popup_dismissal.detect(screen)
 
         prize_crop = crop_rect(screen, self.config.prize_crop)
         capture_id = now.astimezone(self._local_zone()).strftime("%Y%m%d_%H%M%S_%f")
         self._latest_screen = screen.copy()
+        if self._current_popup is not None:
+            # Dialog numbers must never enter wallet, prize, or reset recognition.
+            self._latest_capture_completed_at = self._now()-timedelta(seconds=frame_age)
+            empty = Image.new("RGB", (1, 1))
+            return (screen, RecognitionResult("", "", None, "popup", 0.0, "popup", False),
+                    AnchorStatus(False, False, 0, 0, 0, 0, "", "", "popup", "popup", empty, empty),
+                    PrefilterResult("NOT_RUN", 0, None, None, "popup", {}, False, ""),
+                    capture_ms, 0.0, None, False)
+        self._latest_gem_frame_time=time.monotonic()-frame_age
+        refresh_wallet = (self.gem_guard.refresh_async if getattr(self, '_async_wallet', False)
+                          else self.gem_guard.refresh)
+        refresh_wallet(screen, interval=.5 if self.user_range.minimum_gems is not None else 2.0,
+                       frame_time=self._latest_gem_frame_time)
         self._latest_prize_crop = prize_crop.copy()
         self.recent_prize_crops.append(prize_crop.copy())
-        self._latest_capture_completed_at = self._now()
-        anchors = analyze_anchors(screen, self.config, None)
+        self._latest_capture_completed_at = self._now()-timedelta(seconds=frame_age)
+        if self._stream is not None:
+            from app.stream_anchors import analyze_stream_anchors
+            anchors = analyze_stream_anchors(screen,anchor_config)
+        else:
+            anchors = analyze_anchors(screen, anchor_config, None)
+        shared = getattr(self, '_shared_fund', None)
+        if shared is not None:
+            reading = shared.read(self._now(), self.config.safety_frame_max_age_seconds)
+            if reading.notification_grace and not self.state.continuous_session_active:
+                raise FreshFrameUnavailable('Ждём свежий общий фонд для начала новой серии')
+            self._shared_reading = reading
+            shared.apply_cycle(self, reading, now)
+            self.state.notification_veto = False
+            self.state.notification_heavy = False
+            self._last_production_ocr = None
+            return (screen, RecognitionResult('', '', reading.value, 'shared_fund', 1.0,
+                    'shared_fund', False), anchors,
+                    PrefilterResult('NOT_RUN', 0, None, None, 'shared fund', {}, False, ''),
+                    capture_ms, 0.0, None, False)
         started_fast = time.perf_counter()
         if self.config.fast_prefilter_enabled:
             prefilter = prefilter_range(
@@ -945,6 +1152,7 @@ class PrizeMonitor:
             capture_id,
             control_policy=self._paddle_control_reasons,
             recovery_allowed=anchors.button_visible,
+            frame_local_control=self._stream is not None,
         )
         authoritative_ocr_ms = (time.perf_counter() - started_ocr) * 1000.0
         authoritative_ocr_ran = production_result.rapid is not None
@@ -1052,6 +1260,7 @@ class PrizeMonitor:
         return anchors.event_screen_ok and anchors.button_visible
 
     def _reset_progress_due_to_anchors(self, phase_to_waiting: bool = True) -> None:
+        self.state.continuous_session_active = False
         self._clear_candidate()
         self.state.next_click_at = None
         self.state.checking_until = None
@@ -1326,6 +1535,7 @@ class PrizeMonitor:
             self.state.reset_time_known = True
             self.state.manual_reset_block_real_taps = False
             self.state.phase = MonitorPhase.RESET_COOLDOWN
+            self.state.continuous_session_active = False
             self._clear_candidate()
             self.state.burst_taps_done = 0
             self.state.next_click_at = None
@@ -1392,7 +1602,9 @@ class PrizeMonitor:
             "prize_crop.png": crop_rect(screen, self.config.prize_crop),
             "button_crop.png": anchors.button_crop,
         }
-        if self.state.real_mode_armed:
+        full_due = self._last_full_diagnostics_at is None or (self._now()-self._last_full_diagnostics_at).total_seconds()>=5
+        if self.state.real_mode_armed and (self.state.burst_taps_done==0 or full_due):
+            self._last_full_diagnostics_at=self._now()
             images.update(
                 {
                     "screen.png": screen,
@@ -1400,11 +1612,86 @@ class PrizeMonitor:
                     "pre_tap_screen.png": screen,
                 }
             )
+            if getattr(self, '_latest_native_screen', None) is not None:
+                images['native_screen.png'] = self._latest_native_screen
         accepted = self._diagnostics_writer.submit(target_dir, images, decision_text)
         self._last_diagnostics_enqueue_accepted = accepted
         if not accepted:
             self.state.last_status = "Diagnostics queue full: PNG files skipped for this tap"
         return target_dir
+
+    def _prepare_continuous_tap(
+        self, now: datetime, trusted_value: int | None, anchors: AnchorStatus
+    ) -> tuple[bool, int | None]:
+        state = self.state
+        frame_age = ((now - self._latest_capture_completed_at).total_seconds()
+                     if self._latest_capture_completed_at is not None else float("inf"))
+        if frame_age > self.config.safety_frame_max_age_seconds:
+            state.next_click_at = None
+            state.last_status = "Клики приостановлены: кадр экрана устарел"
+            return False, None
+        if not self.tap_decisions_enabled or not state.reset_time_known or (
+            state.real_mode_armed and state.manual_reset_block_real_taps
+        ):
+            state.continuous_session_active = False
+            state.next_click_at = None
+            state.phase = MonitorPhase.WAITING if state.reset_time_known else MonitorPhase.RESET_TIME_UNKNOWN
+            state.last_status = "Клики запрещены: наблюдение ещё не готово"
+            return False, None
+        if state.cooldown_until and state.cooldown_until > now:
+            state.continuous_session_active = False
+            state.next_click_at = None
+            state.phase = MonitorPhase.RESET_COOLDOWN
+            return False, None
+        if not state.continuous_session_active:
+            if (
+                trusted_value is None or not self.is_target_value(trusted_value)
+                or state.candidate_hits < self.config.stable_reads_required
+                or not anchors.event_screen_ok or not anchors.button_visible
+                or state.notification_veto or state.ocr_status != OcrStatus.VISIBLE
+            ):
+                state.last_status = "Серия ожидает два подтверждения входа в диапазон"
+                return False, None
+            state.continuous_session_active = True
+            state.session_last_visible_at = now
+            state.session_last_value = trusted_value
+            state.session_reset_suspected = False
+
+        if not anchors.button_visible or not (anchors.event_screen_ok or anchors.continuation_screen_ok):
+            self._reset_progress_due_to_anchors()
+            return False, None
+        if self.config.continuous_max_taps > 0 and state.burst_taps_done >= self.config.continuous_max_taps:
+            self.set_real_mode(False)
+            self.pause()
+            self.adb.close_shell()
+            state.last_status = f"Серия достигла предела {self.config.continuous_max_taps} желаний. Нажмите запуск для новой проверки."
+            return False, None
+
+        if trusted_value is not None and state.ocr_status == OcrStatus.VISIBLE and not state.notification_veto:
+            if state.reset_candidate_hits or (state.session_last_value is not None and trusted_value < state.session_last_value):
+                state.session_reset_suspected = True
+                state.next_click_at = None
+                state.last_status = "Клики остановлены: фонд упал, подтверждаем обнуление"
+                return False, None
+            state.session_reset_suspected = False
+            state.session_last_value = trusted_value
+            state.session_last_visible_at = now
+        elif state.session_reset_suspected:
+            state.next_click_at = None
+            state.last_status = "Клики остановлены: ждём подтверждение обнуления"
+            return False, None
+        elif state.notification_veto or state.ocr_status == OcrStatus.OBSCURED:
+            elapsed = ((now - state.session_last_visible_at).total_seconds()
+                       if state.session_last_visible_at is not None else float("inf"))
+            if elapsed > self.config.continuous_visibility_grace_seconds:
+                state.next_click_at = None
+                state.last_status = "Цифры долго закрыты: клики приостановлены до восстановления наблюдения"
+                return False, None
+        else:
+            state.next_click_at = None
+            state.last_status = "Клики приостановлены: ожидаем достоверное чтение фонда"
+            return False, None
+        return True, state.session_last_value
 
     def _handle_active_clicking(
         self,
@@ -1419,15 +1706,43 @@ class PrizeMonitor:
         would_tap = False
         diagnostics_dir: Path | None = None
 
+        if self._tap_cancel.is_set():
+            return clicked, would_tap, diagnostics_dir
+        shared = getattr(self, '_shared_fund', None)
+        if shared is not None and not shared.permits_current(self):
+            self.state.next_click_at = None
+            self.state.last_status = 'Клики ждут: нет свежего разрешения общего фонда'
+            return clicked, would_tap, diagnostics_dir
         if self.state.phase != MonitorPhase.ACTIVE_CLICKING:
             return clicked, would_tap, diagnostics_dir
-        if self.state.notification_veto or self.state.ocr_status == OcrStatus.OBSCURED:
+        floor = self.user_range.minimum_gems
+        if self.state.real_mode_armed and floor is not None:
+            if getattr(self, '_async_wallet', False):
+                permitted, reason = self.gem_guard.permits_cached(floor)
+            else:
+                permitted, reason = self.gem_guard.permits(screen, floor, frame_time=getattr(self,'_latest_gem_frame_time',None))
+            if not permitted:
+                if reason != 'floor':
+                    self.state.next_click_at = None
+                    self.state.last_status = "Клики ждут: проверяем баланс самоцветов. Режим «С кликами» сохранён"
+                    return False, False, None
+                self.set_real_mode(False)
+                self.resume()
+                self.state.last_status = "С кликами выключено: достигнут сохранённый остаток самоцветов"
+                tap_events.append(self.state.last_status)
+                return False, False, None
+        continuous = self.config.continuous_clicking
+        if continuous:
+            permitted, trusted_value = self._prepare_continuous_tap(self._now(), trusted_value, anchors)
+            if not permitted:
+                return clicked, would_tap, diagnostics_dir
+        if not continuous and (self.state.notification_veto or self.state.ocr_status == OcrStatus.OBSCURED):
             self.state.phase = MonitorPhase.CHECKING_AFTER_BURST
             self.state.next_click_at = None
             self.state.checking_until = None
             self.state.last_status = "CHECKING_AFTER_BURST: notification veto, tap series stopped"
             return clicked, would_tap, diagnostics_dir
-        if self.state.ocr_status != OcrStatus.VISIBLE or trusted_value is None:
+        if not continuous and (self.state.ocr_status != OcrStatus.VISIBLE or trusted_value is None):
             self._clear_candidate()
             self.state.next_click_at = None
             self.state.checking_until = None
@@ -1435,7 +1750,7 @@ class PrizeMonitor:
             self.state.phase = MonitorPhase.WAITING
             self.state.last_status = "ACTIVE_CLICKING stopped: current trusted value is unavailable"
             return clicked, would_tap, diagnostics_dir
-        if not self.is_target_value(trusted_value):
+        if not continuous and not self.is_target_value(trusted_value):
             self._clear_candidate()
             self.state.next_click_at = None
             self.state.checking_until = None
@@ -1445,7 +1760,7 @@ class PrizeMonitor:
                 f"ACTIVE_CLICKING stopped: current value {trusted_value} is outside target range"
             )
             return clicked, would_tap, diagnostics_dir
-        if not anchors.event_screen_ok or not anchors.button_visible:
+        if not anchors.button_visible or not (anchors.event_screen_ok or (continuous and anchors.continuation_screen_ok)):
             self._reset_progress_due_to_anchors()
             self.state.last_status = "ACTIVE_CLICKING stopped: safety anchors are not valid"
             return clicked, would_tap, diagnostics_dir
@@ -1483,6 +1798,8 @@ class PrizeMonitor:
             return clicked, would_tap, diagnostics_dir
 
         actual_now = self._now()
+        interval = (self.config.continuous_click_interval_seconds if continuous
+                    else self.config.click_interval_seconds)
         frame_age = (
             (actual_now - self._latest_capture_completed_at).total_seconds()
             if self._latest_capture_completed_at is not None
@@ -1501,10 +1818,10 @@ class PrizeMonitor:
             return clicked, would_tap, diagnostics_dir
         if (
             self.state.last_tap_sent_at is not None
-            and (actual_now - self.state.last_tap_sent_at).total_seconds() < self.config.click_interval_seconds
+            and (actual_now - self.state.last_tap_sent_at).total_seconds() < interval
         ):
             self.state.next_click_at = self.state.last_tap_sent_at + timedelta(
-                seconds=self.config.click_interval_seconds
+                seconds=interval
             )
             return clicked, would_tap, diagnostics_dir
 
@@ -1513,26 +1830,90 @@ class PrizeMonitor:
             tap_events.append(
                 f"{actual_now.strftime('%H:%M:%S.%f')[:-3]} WARNING diagnostics queue full"
             )
+        if self._tap_cancel.is_set():
+            return False, False, None
         if self.state.real_mode_armed:
-            self.adb.tap_persistent(self.config.tap_point.x, self.config.tap_point.y)
+            if self.config.session_real_tap_limit and self.state.real_taps >= self.config.session_real_tap_limit:
+                self.set_real_mode(False)
+                self.pause()
+                self.state.last_status = "Лимит настоящих нажатий достигнут"
+                return False, False, diagnostics_dir
+            audit_path = self.config.runtime_dir / "tap_audit.jsonl"
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            audit = dict(timestamp=actual_now.astimezone().isoformat(), event="tap_attempt",
+                         number=self.state.real_taps + 1, value=trusted_value,
+                         range=self.target_range_for_mode(), screen_ok=anchors.event_screen_ok,
+                         button_ok=anchors.button_visible, frame_age_seconds=frame_age,
+                         notification_veto=self.state.notification_veto,
+                         continuation_screen_ok=anchors.continuation_screen_ok,
+                         last_visible_at=self.state.session_last_visible_at.isoformat() if self.state.session_last_visible_at else None,
+                         decision="notification_grace" if self.state.notification_veto else "visible_number",
+                         x=self._native_point(self.config.tap_point.x, self.config.tap_point.y)[0],
+                         y=self._native_point(self.config.tap_point.x, self.config.tap_point.y)[1])
+            with audit_path.open("a", encoding="utf-8") as audit_file:
+                audit_file.write(json.dumps(audit) + "\n")
+            try:
+                if (getattr(self, '_async_wallet', False) and floor is not None
+                        and not self.gem_guard.permits_cached(floor)[0]):
+                    self.state.next_click_at = None
+                    self.state.last_status = 'Клики ждут свежую проверку баланса'
+                    return False, False, None
+                if (self._tap_cancel.is_set() or self.state.phase != MonitorPhase.ACTIVE_CLICKING
+                        or floor != self.user_range.minimum_gems
+                        or (shared is not None and not shared.permits_current(self))):
+                    self.state.last_status = "Нажатие отменено пользователем"
+                    return False, False, None
+                if self._stream is not None:
+                    point = self._native_point(self.config.tap_point.x, self.config.tap_point.y)
+                    if self._screen_geometry is None:
+                        self._stream.tap(*point)
+                    else:
+                        self._stream.tap(*point, expected_size=(self._screen_geometry.width,self._screen_geometry.height))
+                else:
+                    self.adb.tap_persistent(*self._native_point(self.config.tap_point.x, self.config.tap_point.y))
+            except FreshFrameUnavailable:
+                self.state.next_click_at = None
+                self.state.last_status = "Нажатия приостановлены: ждём свежий видеокадр"
+                return False, False, None
+            except Exception:
+                self.set_real_mode(False)
+                self.pause()
+                self.adb.close_shell()
+                self.state.last_status = "Ошибка ADB: режим выключен, повтор команды запрещён"
+                raise
+            self.state.real_taps += 1
+            if floor is not None:
+                self.gem_guard.reserve_sent_tap()
+            audit["event"] = "tap_sent"
+            with audit_path.open("a", encoding="utf-8") as audit_file:
+                audit_file.write(json.dumps(audit) + "\n")
             clicked = True
             tap_events.append(f"{actual_now.strftime('%H:%M:%S.%f')[:-3]} REAL adb tap")
         else:
+            self.state.virtual_taps += 1
             would_tap = True
             tap_events.append(f"{actual_now.strftime('%H:%M:%S.%f')[:-3]} virtual tap")
         self.state.last_tap_sent_at = actual_now
         self.state.burst_taps_done += 1
         self.state.total_taps += 1
-        self.state.next_click_at = actual_now + timedelta(seconds=self.config.click_interval_seconds)
+        self.state.next_click_at = actual_now + timedelta(seconds=interval)
         self.state.last_status = (
-            f"ACTIVE_CLICKING: tap {self.state.burst_taps_done}/{self.config.burst_size}, "
+            f"ACTIVE_CLICKING: tap {self.state.burst_taps_done}/{(self.config.continuous_max_taps or 'до reset') if continuous else self.config.burst_size}, "
             f"total {self.state.total_taps}"
         )
-        if self.state.burst_taps_done >= self.config.burst_size:
+        if continuous and self.state.notification_veto:
+            self.state.last_status += "; краткое уведомление, серия продолжается"
+        if not continuous and self.state.burst_taps_done >= self.config.burst_size:
             self.state.phase = MonitorPhase.CHECKING_AFTER_BURST
             self.state.checking_until = actual_now + timedelta(seconds=self.config.provisional_check_pause_seconds)
             self._post_burst_paddle_pending = True
             self.state.last_status = "CHECKING_AFTER_BURST: waiting for clean frames after burst"
+
+        if clicked and self.config.session_real_tap_limit and self.state.real_taps >= self.config.session_real_tap_limit:
+            self.set_real_mode(False)
+            self.pause()
+            self.adb.close_shell()
+            self.state.last_status = "Лимит настоящих нажатий достигнут. Монитор на паузе."
 
         return clicked, would_tap, diagnostics_dir
 
@@ -1558,13 +1939,53 @@ class PrizeMonitor:
 
         self._update_unknown_and_cooldown(now)
 
+        # A rejected anchor/OCR frame is not a stopped video stream. Retain the
+        # reset baseline during continuous capture, but never use it for taps.
+        self._expire_interrupted_observation(now)
         previous_trusted_at = self.state.last_trusted_at
         screen, recognition, anchors, prefilter, capture_ms, fast_observation_ms, authoritative_ocr_ms, authoritative_ocr_ran = self._capture_context(now)
+        self._last_observation_at = now
+        popup = self._current_popup
+        popup_ready = self._popup_dismissal.observe(popup, self._stream_sequence)
+        if popup is not None:
+            self._clear_candidate()
+            self.state.continuous_session_active = False
+            self.state.next_click_at = None
+            if self.state.phase in {MonitorPhase.CANDIDATE, MonitorPhase.CONFIRMED,
+                                    MonitorPhase.ACTIVE_CLICKING, MonitorPhase.CHECKING_AFTER_BURST}:
+                self.state.phase = MonitorPhase.WAITING
+            self.state.last_status = "Мешающее окно: желания остановлены"
+            if (popup_ready and self._stream is not None and self.tap_decisions_enabled
+                    and not self._tap_cancel.is_set()
+                    and self.state.phase not in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}):
+                # Recheck a fresh independent frame immediately before normal Android input.
+                safety = self._stream.frame()
+                from app.screen_geometry import ScreenGeometry
+                safety_geometry = ScreenGeometry(*safety.image.size)
+                if (safety_geometry == (getattr(self, '_screen_geometry', None) or ScreenGeometry(1080,1080))
+                        and self._popup_dismissal.detect(safety_geometry.normalize(safety.image)) == popup
+                        and not self._tap_cancel.is_set()):
+                    self._popup_dismissal.reserve_attempt()
+                    folder = self.config.screenshot_path.parent / "popup_dismissals"
+                    folder.mkdir(parents=True, exist_ok=True)
+                    safety.image.save(folder / f"{capture_id}_{popup.kind}.png")
+                    if not self._tap_cancel.is_set():
+                        if getattr(self, '_screen_geometry', None) is None:
+                            self._stream.tap(*popup.point)
+                        else:
+                            self._stream.tap(*safety_geometry.to_native(*popup.point), expected_size=safety.image.size)
+                        event = f"{timestamp} popup_close kind={popup.kind} point={popup.point}"
+                        with (folder / "events.jsonl").open("a", encoding="utf-8") as log:
+                            log.write(json.dumps({"timestamp": timestamp, "kind": popup.kind,
+                                                  "point": popup.point, "wish_tap": False}) + "\n")
+                        tap_events.append(event)
+                        self.state.last_status = "Закрываем мешающее окно; ждём экран желаний"
         prize_crop = crop_rect(screen, self.config.prize_crop)
         self.state.ocr_status = self._determine_ocr_status(recognition, anchors)
         self.state.raw_ocr_value = recognition.value
         trusted_value, trust_reason = (
-            self._resolve_trusted_value(recognition.value, now)
+            (recognition.value, 'shared confirmed fund') if recognition.method == 'shared_fund'
+            else self._resolve_trusted_value(recognition.value, now)
             if self.state.ocr_status == OcrStatus.VISIBLE
             else (None, "OCR not visible")
         )
@@ -1574,6 +1995,10 @@ class PrizeMonitor:
         self.state.last_trust_reason = trust_reason
         in_range = trusted_value is not None and self.is_target_value(trusted_value)
         anchors_ok = self._anchors_allow_progress(anchors)
+        continuation_ok = (
+            self.config.continuous_clicking and self.state.continuous_session_active
+            and anchors.continuation_screen_ok and anchors.button_visible
+        )
         self._append_observation(now, recognition, anchors, prefilter)
 
         if (
@@ -1589,6 +2014,8 @@ class PrizeMonitor:
 
         if (
             self.state.phase not in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}
+            and recognition.method != 'shared_fund'
+            and (anchors_ok or continuation_ok)
             and self.state.ocr_status == OcrStatus.VISIBLE
             and trusted_value is not None
         ):
@@ -1613,7 +2040,7 @@ class PrizeMonitor:
         ):
             diagnostics_dir = self._save_outlier_diagnostics(screen, prize_crop, recognition, now, trust_reason)
 
-        if not anchors_ok and self.state.phase in {
+        if not (anchors_ok or continuation_ok) and self.state.phase in {
             MonitorPhase.WAITING,
             MonitorPhase.CANDIDATE,
             MonitorPhase.CONFIRMED,
@@ -1647,7 +2074,7 @@ class PrizeMonitor:
                 self.state.last_status = "CHECKING_AFTER_BURST завершён"
 
         elif self.state.phase == MonitorPhase.ACTIVE_CLICKING:
-            if not anchors_ok:
+            if not (anchors_ok or continuation_ok):
                 self._reset_progress_due_to_anchors()
             else:
                 clicked, would_tap, diagnostics_dir = self._handle_active_clicking(
@@ -1671,7 +2098,9 @@ class PrizeMonitor:
                 self._reset_progress_due_to_anchors()
             elif self.state.ocr_status == OcrStatus.VISIBLE and trusted_value is not None:
                 if self.state.phase != MonitorPhase.RESET_COOLDOWN:
-                    self._update_candidate(trusted_value, capture_id, now, anchors)
+                    candidate_id = (f'shared-{self._shared_reading.sequence}'
+                                    if recognition.method == 'shared_fund' else capture_id)
+                    self._update_candidate(trusted_value, candidate_id, now, anchors)
                     if self._can_start_clicking(trusted_value, anchors, now):
                         self.state.phase = MonitorPhase.ACTIVE_CLICKING
                         self.state.burst_taps_done = 0
@@ -1704,11 +2133,13 @@ class PrizeMonitor:
         if (
             self.state.ocr_status == OcrStatus.OBSCURED
             and self.state.phase not in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}
+            and not (self.config.continuous_clicking and self.state.phase == MonitorPhase.ACTIVE_CLICKING)
         ):
             self.state.last_status = "Фонд временно закрыт уведомлением. Ожидание чистого кадра."
         elif (
             recognition.method == "rapid_paddle_disagreement"
             and self.state.phase not in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP}
+            and not (self.config.continuous_clicking and self.state.phase == MonitorPhase.ACTIVE_CLICKING)
         ):
             self.state.last_status = "RapidOCR и PaddleOCR расходятся. Ожидание следующего чистого кадра."
 
@@ -1773,6 +2204,7 @@ class PrizeMonitor:
                 self._last_production_ocr is not None
                 and self._last_production_ocr.paddle is not None
             ),
+            continuation_screen_ok=anchors.continuation_screen_ok,
         )
 
     @staticmethod
@@ -1780,5 +2212,9 @@ class PrizeMonitor:
         return datetime.now().strftime("%H:%M:%S")
 
     def close(self) -> None:
-        self._diagnostics_writer.close(timeout=3.0)
+        self.set_real_mode(False)
         self.adb.close_shell()
+        if self._stream is not None:
+            self._stream.close()
+            self._stream = None
+        self._diagnostics_writer.close(timeout=None)

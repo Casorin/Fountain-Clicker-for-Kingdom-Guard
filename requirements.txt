@@ -4,3 +4,4 @@ Pillow==12.3.0
 paddlex[ocr-core]==3.7.2
 paddleocr==3.7.0
 rapidocr==3.9.1
+av==19.0.1

@@ -53,6 +53,10 @@ class TapPoint:
 
 @dataclass(frozen=True)
 class AppConfig:
+    stream_transport_enabled: bool = False
+    stream_max_fps: int = 15
+    stream_max_size: int = 0
+    stream_server_path: Path = Path('assets/scrcpy/scrcpy-server-v4.1')
     adb_path: Path = field(default_factory=_default_adb_path)
     adb_serial: str = field(default_factory=_default_adb_serial)
     runtime_dir: Path = Path("runtime")
@@ -77,6 +81,14 @@ class AppConfig:
     title_template_path: Path = Path("assets") / "templates" / "event_title.png"
     screen_anchor_template_path: Path = Path("assets") / "templates" / "screen_anchor.png"
     button_template_path: Path = Path("assets") / "templates" / "wish_button.png"
+    layout_template_dir: Path = Path("assets/templates/layout")
+    layout_text_threshold: float = 0.90
+    prize_label_crop: Rect = Rect(292, 316, 434, 340)
+    daily_label_crop: Rect = Rect(278, 395, 452, 417)
+    wish_label_crop: Rect = Rect(434, 980, 650, 1009)
+    reward_label_crop: Rect = Rect(330, 814, 760, 840)
+    session_real_tap_limit: int = 0
+    observation_gap_seconds: float = 30.0
     poll_interval_ms: int = 200
     min_prize: int = 200_000
     max_prize: int = 500_000
@@ -87,6 +99,10 @@ class AppConfig:
     unlock_reads_required: int = 3
     reset_cooldown_seconds: int = 120
     click_interval_seconds: float = 0.5
+    continuous_clicking: bool = True
+    continuous_click_interval_seconds: float = 0.20
+    continuous_visibility_grace_seconds: float = 2.0
+    continuous_max_taps: int = 150
     burst_size: int = 8
     provisional_check_pause_seconds: float = 2.0
     allow_in_range_fallback: bool = False

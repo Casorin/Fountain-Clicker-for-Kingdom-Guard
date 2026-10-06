@@ -114,6 +114,10 @@ class ResetEvent:
 class UserRangeConfig:
     test_min_prize: int
     test_max_prize: int
+    no_upper_limit: bool = False
+    minimum_gems: int | None = None
+    start_method: str = "range"
+    start_percent: int = 85
 
     @classmethod
     def load(cls, path: Path, default_min: int, default_max: int) -> "UserRangeConfig":
@@ -127,13 +131,26 @@ class UserRangeConfig:
         test_max = data.get("test_max_prize", default_max)
         if not isinstance(test_min, int) or not isinstance(test_max, int):
             return cls(test_min_prize=default_min, test_max_prize=default_max)
-        return cls(test_min_prize=test_min, test_max_prize=test_max)
+        floor = data.get("minimum_gems")
+        if type(floor) is not int or floor < 0:
+            floor = None
+        percent = data.get("start_percent", 85)
+        if type(percent) is not int or not 1 <= percent <= 100:
+            percent = 85
+        return cls(test_min_prize=test_min, test_max_prize=test_max,
+                   no_upper_limit=data.get("no_upper_limit") is True, minimum_gems=floor,
+                   start_method="percent" if data.get("start_method") == "percent" else "range",
+                   start_percent=percent)
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "test_min_prize": self.test_min_prize,
             "test_max_prize": self.test_max_prize,
+            "no_upper_limit": self.no_upper_limit,
+            "minimum_gems": self.minimum_gems,
+            "start_method": self.start_method,
+            "start_percent": self.start_percent,
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import deque
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -37,9 +39,17 @@ class DiagnosticsWriter:
         images: dict[str, Image.Image],
         decision_text: str,
     ) -> bool:
+        if self._stop.is_set():
+            return False
+        copies={}
+        copied_images={}
+        for name,image in images.items():
+            if id(image) not in copies:
+                copies[id(image)]=image.copy()
+            copied_images[name]=copies[id(image)]
         task = DiagnosticsTask(
             target_dir=target_dir,
-            images={name: image.copy() for name, image in images.items()},
+            images=copied_images,
             decision_text=decision_text,
             enqueued_at=time.perf_counter(),
         )
@@ -74,8 +84,19 @@ class DiagnosticsWriter:
             status = "written"
             try:
                 task.target_dir.mkdir(parents=True, exist_ok=True)
+                written={}
                 for name, image in task.images.items():
-                    image.save(task.target_dir / name)
+                    path=task.target_dir/name
+                    if id(image) in written:
+                        try:
+                            os.link(written[id(image)],path)
+                        except OSError:
+                            shutil.copyfile(written[id(image)],path)
+                    else:
+                        temporary=path.with_suffix(path.suffix+'.part')
+                        image.save(temporary,format='PNG',compress_level=1)
+                        os.replace(temporary,path)
+                        written[id(image)]=path
                 (task.target_dir / "decision.txt").write_text(
                     task.decision_text
                     + f"\ndiagnostics_queue_latency_ms={queue_latency_ms:.3f}\n",
@@ -108,7 +129,7 @@ class DiagnosticsWriter:
     def is_alive(self) -> bool:
         return self._thread.is_alive()
 
-    def close(self, timeout: float = 3.0) -> bool:
+    def close(self, timeout: float | None = 3.0) -> bool:
         self._stop.set()
         self._thread.join(timeout=timeout)
         return not self._thread.is_alive()
