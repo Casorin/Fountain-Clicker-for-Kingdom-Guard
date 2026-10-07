@@ -42,6 +42,26 @@ class DesignTests(unittest.TestCase):
         button.invoke()
         self.app.open_program_window.assert_called_once()
 
+    def test_daily_reward_warning_is_under_mode_switch_and_matches_theme(self):
+        from tkinter import ttk
+        warning = self.design.daily_reward_warning
+        self.assertIn('Первые 100 желаний', warning.cget('text'))
+        self.assertFalse(warning.winfo_viewable())
+        self.app.mode_var.set(True)
+        self.root.update()
+        self.assertTrue(warning.winfo_viewable())
+        self.assertGreaterEqual(warning.winfo_y(), self.design.mode_switch.winfo_height())
+        self.assertLessEqual(warning.winfo_width(), 300)
+        style = ttk.Style(self.root)
+        self.assertEqual(style.lookup('HeroWarning.TLabel', 'foreground'), '#c5314b')
+        self.design.toggle_theme()
+        self.root.update()
+        self.assertEqual(style.lookup('HeroWarning.TLabel', 'foreground'), '#ff9aa9')
+        self.app.mode_var.set(False)
+        self.root.update()
+        self.assertFalse(warning.winfo_viewable())
+        self.assertEqual(warning.winfo_manager(), '')
+
     def test_additional_window_launches_directly_with_unique_profile(self):
         with patch('app.ui.subprocess.Popen') as launch, patch('app.ui.tk.Toplevel') as dialog:
             AppWindow.open_program_window(self.app)

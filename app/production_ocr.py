@@ -85,7 +85,13 @@ def digit_visibility(prize_crop: Image.Image) -> tuple[bool, bool]:
     white = (rgb.min(axis=2) > 150) & (rgb.max(axis=2) - rgb.min(axis=2) < 30)
     cool = ((blue > red + 15) | (green > red + 25)) & (rgb.max(axis=2) > 90)
     yellow = (red > 90) & (green > 70) & (red - blue > 25) & (green - blue > 20)
-    obscured = white.mean() > 0.05 or cool.mean() > 0.01 or yellow.sum() < 40
+    # A small blue background fragment at the right edge is not a reward icon.
+    # Accepted edge content still requires independent dual-engine OCR control.
+    interior_cool = cool[:, :-max(1, round(cool.shape[1] * 0.10))]
+    small_right_fragment = cool.mean() <= 0.02 and not interior_cool.any()
+    obscured = (white.mean() > 0.05
+                or (cool.mean() > 0.01 and not small_right_fragment)
+                or yellow.sum() < 40)
     edge_content = bool(white.any() or cool.any())
     return not obscured, edge_content
 

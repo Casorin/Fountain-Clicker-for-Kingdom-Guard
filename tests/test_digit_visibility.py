@@ -41,6 +41,22 @@ class VisibilityTests(unittest.TestCase):
         self.assertEqual(self.engines.calls, ["rapid", "paddle"])
         self.assertIn("digit_visibility_control", result.control_reasons)
 
+    def test_bluestacks_right_background_fragment_is_not_overlap(self):
+        with Image.open(FIXTURES / 'blue_right_fragment.png') as crop:
+            crop = crop.convert('RGB')
+        self.engines.value = self.engines.paddle_value = 24150
+        self.assertEqual(digit_visibility(crop), (True, True))
+        result = self.pipeline.process(crop, 'blue-edge', frame_local_control=True)
+        self.assertEqual(result.current.value, 24150)
+        self.assertFalse(result.notification.veto)
+        self.assertEqual(self.engines.calls, ['rapid', 'paddle'])
+
+    def test_bluestacks_edge_does_not_bypass_dual_ocr(self):
+        with Image.open(FIXTURES / 'blue_right_fragment.png') as crop:
+            self.engines.paddle_value = 999999
+            result = self.pipeline.process(crop.convert('RGB'), 'blue-disagreement', frame_local_control=True)
+        self.assertIsNone(result.current)
+
     def test_video_visible_frame_does_not_wait_for_consecutive_fade_frames(self):
         self.pipeline.process(frame(8),'hidden',frame_local_control=True)
         result=self.pipeline.process(frame(5),'visible',frame_local_control=True)

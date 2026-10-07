@@ -253,6 +253,11 @@ class FountainDesign:
         modes.grid(row=0, column=1, padx=(10,0))
         self.mode_switch=ModeSwitch(modes,self.choose_mode)
         self.mode_switch.pack()
+        self.daily_reward_warning = ttk.Label(
+            modes, text='Первые 100 желаний за день могут идти\nс паузами из-за уведомлений о наградах.',
+            style='HeroWarning.TLabel', justify='center', wraplength=300)
+        app.mode_var.trace_add('write', lambda *_: self.update_daily_reward_warning())
+        self.update_daily_reward_warning()
 
         self.history_splitter = ttk.PanedWindow(frame, orient='vertical')
         self.history_splitter.grid(row=2, column=0, sticky='nsew', pady=(0,8))
@@ -424,6 +429,13 @@ class FountainDesign:
         app.start_method_var.trace_add('write', lambda *_: self.root.after_idle(app.on_start_method_changed))
         self.update_start_method()
         self.pulse()
+
+    def update_daily_reward_warning(self):
+        if self.app.mode_var.get():
+            if not self.daily_reward_warning.winfo_manager():
+                self.daily_reward_warning.pack(pady=(4, 0))
+        else:
+            self.daily_reward_warning.pack_forget()
 
     def card(self, parent, expand=False):
         frame = ttk.Frame(parent, style="RoundedCard.TFrame", padding=(12, 4))
@@ -604,6 +616,9 @@ class FountainDesign:
         p = PALETTES[self.theme]
         s = ttk.Style(self.root)
         s.theme_use("clam")
+        s.configure('HeroWarning.TLabel', background=p['hero'],
+                    foreground='#c5314b' if self.theme == 'light' else '#ff9aa9',
+                    font=('Trebuchet MS', 9))
         if not hasattr(self, "theme_images"):
             self.theme_images = {}
         for role, color in (("Card", p["card"]), ("Hero", p["hero"]), ("Pink", p["pink"]),
