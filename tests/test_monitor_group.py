@@ -145,3 +145,42 @@ class GroupTests(unittest.TestCase):
         self.assertFalse(self.group.any_active)
         self.assertFalse(self.group.any_real)
         self.assertTrue(all(m.closed for m in self.monitors))
+
+    def test_pause_retains_requested_click_mode_but_cancels_inputs(self):
+        for session in self.group.sessions.values():
+            session.requested_real = True
+            session.monitor.state.real_mode_armed = True
+            session.active.set()
+        self.group.pause()
+        self.assertTrue(self.group.any_real)
+        self.assertFalse(self.group.any_active)
+        for session in self.group.sessions.values():
+            self.assertTrue(session.requested_real)
+            self.assertFalse(session.monitor.state.real_mode_armed)
+            self.assertTrue(session.monitor._tap_cancel.is_set())
+            self.assertEqual(session.monitor.state.phase, MonitorPhase.PAUSED)
+
+    def test_resume_reapplies_retained_click_mode_without_real_inputs(self):
+        from unittest.mock import Mock
+        for session in self.group.sessions.values():
+            session.monitor.set_real_mode = Mock(return_value=(True, 'test'))
+            session.request_mode(True)
+        self.group.start()
+        self.wait_for(lambda: all(m.state.virtual_taps >= 2 for m in self.monitors))
+        self.group.pause()
+        time.sleep(.03)
+        counts = [m.state.virtual_taps for m in self.monitors]
+        self.group.start()
+        self.wait_for(lambda: all(m.state.virtual_taps > n for m, n in zip(self.monitors, counts)))
+        for session in self.group.sessions.values():
+            self.assertTrue(session.requested_real)
+            self.assertTrue(session.monitor.set_real_mode.call_args.args[0])
+
+    def test_emergency_stop_discards_retained_click_mode(self):
+        for session in self.group.sessions.values():
+            session.requested_real = True
+        self.group.pause()
+        self.assertTrue(self.group.any_real)
+        self.group.emergency_stop()
+        self.assertFalse(self.group.any_real)
+        self.assertFalse(self.group.any_active)

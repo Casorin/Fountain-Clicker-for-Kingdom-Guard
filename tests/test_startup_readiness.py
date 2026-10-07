@@ -7,6 +7,15 @@ from app.ui import AppWindow
 
 
 class StartupReadinessTests(unittest.TestCase):
+    def test_single_window_pause_does_not_change_click_mode(self):
+        app = SimpleNamespace(running=True, _group=None, monitor=Mock(),
+                              _refresh_static_panels=Mock(), status_var=Mock(),
+                              phase_var=Mock(), _append_log=Mock(), _write_runtime_status=Mock())
+        AppWindow.pause(app)
+        self.assertFalse(app.running)
+        app.monitor.pause.assert_called_once()
+        app.monitor.set_real_mode.assert_not_called()
+
     def test_failed_preparation_can_be_retried_from_start(self):
         app = SimpleNamespace(_switching_window=False, _window_picker_active=False,
                               _selection_error=None, running=False, _cleanup_thread=None,

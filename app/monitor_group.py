@@ -64,7 +64,8 @@ class MonitorSession:
     def pause(self):
         self.active.clear()
         self.monitor._tap_cancel.set()
-        self.request_mode(False)
+        # Disarm current inputs, but retain the user's mode for F8 resume.
+        self.mode_version += 1
         self.monitor.set_real_mode(False)
         self.monitor.pause()
 
@@ -76,6 +77,7 @@ class MonitorSession:
         self.mode_version += 1
 
     def stop(self):
+        self.request_mode(False)
         self.pause()
         self.stopping.set()
 
@@ -135,7 +137,8 @@ class MonitorSession:
                     self.last_wait_reason = None
                     if self.fund_source:
                         self.shared_fund.publish(self.monitor, snapshot)
-                    if was_armed and not self.monitor.state.real_mode_armed:
+                    if (was_armed and not self.monitor.state.real_mode_armed
+                            and self.active.is_set() and self.mode_version == self.applied_mode_version):
                         # A wallet/safety stop must never automatically re-arm this device.
                         self.requested_real = False
                     if self.active.is_set() and not self.stopping.is_set() and not self.reset_requested.is_set():
@@ -158,7 +161,7 @@ class MonitorSession:
                     if self.fund_source:
                         self.shared_fund.invalidate()
                     self.pause()
-                    self.monitor.set_real_mode(False)
+                    self.request_mode(False)
                     self.last_error = str(exc)
                     self.monitor.state.last_status = 'Окно остановлено: ' + str(exc)
                     self.publish(self.window.uuid, 'error', str(exc))

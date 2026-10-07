@@ -1101,7 +1101,6 @@ class AppWindow:
         if self._group:
             self._group.pause()
         else:
-            self.monitor.set_real_mode(False)
             self.monitor.pause()
             self.monitor.adb.close_shell()
         self._refresh_static_panels()
@@ -1143,6 +1142,8 @@ class AppWindow:
 
     def emergency_stop(self) -> None:
         self.running = False
+        self._warmup_start_requested = False
+        self.mode_var.set(False)
         if self._group:
             self._group.emergency_stop()
         else:
