@@ -6,7 +6,7 @@ from app.stream_transport import FreshFrameUnavailable
 
 
 CYCLE_FIELDS = ('last_reset_at', 'last_reset_confirmed_at', 'cooldown_until',
-                'reset_time_known', 'unknown_since', 'manual_reset_block_real_taps',
+                'reset_time_known', 'unknown_since', 'manual_reset_block_real_taps', 'start_requires_new_reset',
                 'reset_episode_token', 'last_confirmed_prize', 'last_trusted_at',
                 'peak_since_reset', 'reset_candidate_hits')
 

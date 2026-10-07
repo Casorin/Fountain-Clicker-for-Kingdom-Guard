@@ -123,6 +123,8 @@ class MonitorState:
     session_last_visible_at: datetime | None = None
     session_last_value: int | None = None
     session_reset_suspected: bool = False
+    anchor_recovery_started_at: datetime | None = None
+    start_requires_new_reset: bool = False
 
 
 @dataclass(frozen=True)
@@ -281,6 +283,21 @@ class PrizeMonitor:
         else:
             self.state.phase = MonitorPhase.RESET_TIME_UNKNOWN
 
+    def _restore_recent_reset_timer(self, now: datetime) -> bool:
+        state = self.state
+        if state.manual_reset_block_real_taps or state.start_requires_new_reset:
+            return False
+        if state.last_reset_at is None or state.last_reset_confirmed_at is None:
+            return False
+        elapsed = now.timestamp()-state.last_reset_at.timestamp()
+        if not 0 <= elapsed <= 900:
+            return False
+        state.reset_time_known = True
+        deadline = state.last_reset_at + timedelta(seconds=self.config.reset_cooldown_seconds)
+        state.cooldown_until = deadline if deadline > now else None
+        state.phase = MonitorPhase.RESET_COOLDOWN if state.cooldown_until else MonitorPhase.WAITING
+        return True
+
     def _discard_stale_observation(self, now: datetime) -> None:
         # A gap is not evidence of a reset. Keep history/deadlines, discard only
         # the old live comparison baseline and restart the observation period.
@@ -301,6 +318,7 @@ class PrizeMonitor:
         self._clear_candidate()
         self._clear_reset_candidate()
         self.state.phase = MonitorPhase.RESET_TIME_UNKNOWN
+        self._restore_recent_reset_timer(now)
 
     def _expire_interrupted_observation(self, now: datetime) -> None:
         previous_frame_at = getattr(self, '_last_observation_at', None)
@@ -589,6 +607,23 @@ class PrizeMonitor:
         self.state.real_mode_armed = enabled
         self.state.test_mode = not enabled
         self.state.last_status = "Реальный режим включён" if enabled else "Тестовый режим включён"
+        if enabled and not self.state.manual_reset_block_real_taps:
+            now = self._now()
+            reset = self.state.last_reset_at
+            if reset is not None and (now.timestamp()-reset.timestamp() > 900 or reset > now):
+                self.state.start_requires_new_reset = True
+                self.state.reset_time_known = False
+                self.state.phase = MonitorPhase.RESET_TIME_UNKNOWN
+                self.state.last_status = 'Последнее обнуление было более 15 минут назад. Ждём новое обнуление.'
+            elif reset is None or self.state.last_reset_confirmed_at is None:
+                self.state.start_requires_new_reset = True
+                self.state.reset_time_known = False
+                self.state.phase = MonitorPhase.RESET_TIME_UNKNOWN
+                self.state.last_status = 'Нет подтверждённого времени обнуления. Ждём новое обнуление.'
+            elif self._restore_recent_reset_timer(now):
+                self.state.last_status = ('Ждём окончания двух минут после обнуления'
+                                         if self.state.cooldown_until else
+                                         'Таймер обнуления подтверждён. Проверяем правило кликов.')
         return True, self.state.last_status
 
     def pause(self) -> None:
@@ -1260,6 +1295,17 @@ class PrizeMonitor:
         return anchors.event_screen_ok and anchors.button_visible
 
     def _reset_progress_due_to_anchors(self, phase_to_waiting: bool = True) -> None:
+        if (self._stream is not None and self.config.continuous_clicking
+                and self.state.continuous_session_active
+                and self.state.phase == MonitorPhase.ACTIVE_CLICKING):
+            now = self._now()
+            if self.state.anchor_recovery_started_at is None:
+                self.state.anchor_recovery_started_at = now
+            if 0 <= (now-self.state.anchor_recovery_started_at).total_seconds() < .5:
+                self.state.next_click_at = None
+                self.state.last_status = 'Короткая пауза: ждём восстановления кнопки и экрана'
+                return
+        self.state.anchor_recovery_started_at = None
         self.state.continuous_session_active = False
         self._clear_candidate()
         self.state.next_click_at = None
@@ -1274,7 +1320,9 @@ class PrizeMonitor:
             if self.state.unknown_since is None:
                 self.state.unknown_since = now
             observed = (now - self.state.unknown_since).total_seconds()
-            if observed >= self.config.reset_cooldown_seconds and not self.state.manual_reset_block_real_taps:
+            if (observed >= self.config.reset_cooldown_seconds
+                    and not self.state.manual_reset_block_real_taps
+                    and not self.state.start_requires_new_reset):
                 self.state.reset_time_known = True
                 if self.state.phase == MonitorPhase.RESET_TIME_UNKNOWN:
                     self.state.phase = MonitorPhase.WAITING
@@ -1534,6 +1582,7 @@ class PrizeMonitor:
             self.state.cooldown_until = reset_event_at + timedelta(seconds=self.config.reset_cooldown_seconds)
             self.state.reset_time_known = True
             self.state.manual_reset_block_real_taps = False
+            self.state.start_requires_new_reset = False
             self.state.phase = MonitorPhase.RESET_COOLDOWN
             self.state.continuous_session_active = False
             self._clear_candidate()
@@ -1643,6 +1692,10 @@ class PrizeMonitor:
             state.next_click_at = None
             state.phase = MonitorPhase.RESET_COOLDOWN
             return False, None
+        if (state.anchor_recovery_started_at is not None
+                and (now-state.anchor_recovery_started_at).total_seconds() >= .5):
+            self._reset_progress_due_to_anchors()
+            return False, None
         if not state.continuous_session_active:
             if (
                 trusted_value is None or not self.is_target_value(trusted_value)
@@ -1653,6 +1706,7 @@ class PrizeMonitor:
                 state.last_status = "Серия ожидает два подтверждения входа в диапазон"
                 return False, None
             state.continuous_session_active = True
+            state.anchor_recovery_started_at = None
             state.session_last_visible_at = now
             state.session_last_value = trusted_value
             state.session_reset_suspected = False
@@ -1660,6 +1714,7 @@ class PrizeMonitor:
         if not anchors.button_visible or not (anchors.event_screen_ok or anchors.continuation_screen_ok):
             self._reset_progress_due_to_anchors()
             return False, None
+        state.anchor_recovery_started_at = None
         if self.config.continuous_max_taps > 0 and state.burst_taps_done >= self.config.continuous_max_taps:
             self.set_real_mode(False)
             self.pause()
@@ -2085,7 +2140,9 @@ class PrizeMonitor:
             self.state.last_status = "RESET_COOLDOWN: клики запрещены"
 
         elif self.state.phase == MonitorPhase.RESET_TIME_UNKNOWN:
-            if self.state.manual_reset_block_real_taps:
+            if self.state.start_requires_new_reset:
+                self.state.last_status = 'Последнее обнуление устарело. Ждём новое подтверждённое обнуление.'
+            elif self.state.manual_reset_block_real_taps:
                 self.state.last_status = "RESET_TIME_UNKNOWN: после ручного сброса ждём новое достоверное обнуление"
             else:
                 self.state.last_status = "RESET_TIME_UNKNOWN: ждём 120 секунд безопасного наблюдения"

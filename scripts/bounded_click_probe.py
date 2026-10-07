@@ -48,11 +48,24 @@ def stats(values):
             'p95': values[min(len(values)-1, int(len(values)*.95))], 'max': values[-1]} if values else {}
 
 
+def select_probe_windows(windows, uuid=None):
+    if uuid is not None:
+        selected = [window for window in windows if window.uuid == uuid]
+        if len(selected) != 1:
+            raise RuntimeError('The explicitly selected test window is unavailable')
+        return selected
+    if len(windows) != 3 or [w.name for w in windows[:2]] != ['MEmu', 'MEmu_2']:
+        raise RuntimeError('Expected exactly the three previously selected windows')
+    return windows
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--real-taps', action='store_true', required=True)
     parser.add_argument('--limit', type=int, default=100)
     parser.add_argument('--seconds', type=int, default=240)
+    parser.add_argument('--window-uuid')
+    parser.add_argument('--record-notifications', action='store_true')
     args = parser.parse_args()
     if not 1 <= args.limit <= 100 or not 1 <= args.seconds <= 300:
         parser.error('Limit must be 1..100 and duration 1..300 seconds')
@@ -60,8 +73,7 @@ def main():
                    continuous_click_interval_seconds=.125, continuous_max_taps=0,
                    session_real_tap_limit=args.limit)
     windows = resolve_selections(base.runtime_dir/'window_selection.json', base.adb_path)
-    if len(windows) != 3 or [w.name for w in windows[:2]] != ['MEmu','MEmu_2']:
-        raise RuntimeError('Expected exactly the three previously selected windows')
+    windows = select_probe_windows(windows, args.window_uuid)
     leases = DeviceLeases(base.runtime_dir/'device_owners')
     leases.acquire([identity for w in windows for identity in (w.serial, 'device:'+w.uuid)])
     output = base.runtime_dir/('bounded_probe_'+datetime.now().strftime('%Y%m%d_%H%M%S'))
@@ -113,9 +125,28 @@ def main():
                 return ok, message
             monitor.connect = measured_connect
             poll = monitor.poll_once
-            def measured_poll(poll=poll, counts=counts):
+            recording = {'samples': [], 'screens': 0}
+            def measured_poll(poll=poll, counts=counts, m=monitor, folder=folder,
+                              budget=budget, recording=recording):
                 snapshot = poll()
                 counts[snapshot.status] += 1
+                samples = recording['samples']
+                if args.record_notifications and budget.reserved and len(samples) < 300:
+                    from app.capture import crop_rect
+                    from app.screen_geometry import ScreenGeometry
+                    native = getattr(m, '_latest_native_screen', None)
+                    if native is not None:
+                        screen = ScreenGeometry(*native.size).normalize(native)
+                        name = f'notification_{len(samples):03d}'
+                        crop_rect(screen, m.config.prize_crop).save(folder/(name+'.png'))
+                        if snapshot.notification_veto and recording['screens'] < 12:
+                            screen.save(folder/(name+'_screen.png'))
+                            recording['screens'] += 1
+                        samples.append({'file': name+'.png', 'value': snapshot.trusted_value,
+                                        'veto': snapshot.notification_veto, 'status': snapshot.status,
+                                        'sent': budget.sent})
+                        (folder/'notification_frames.json').write_text(
+                            json.dumps(samples, ensure_ascii=False), encoding='utf-8')
                 return snapshot
             monitor.poll_once = measured_poll
             entries.append((window,monitor))

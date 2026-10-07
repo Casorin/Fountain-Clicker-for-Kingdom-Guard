@@ -7,6 +7,8 @@ from app.monitor import MonitorPhase
 
 class WorkflowTests(InRangeConfirmationTests):
     def test_rearm_discards_virtual_candidate(self):
+        self.monitor.state.last_reset_at = self.now-timedelta(minutes=3)
+        self.monitor.state.last_reset_confirmed_at = self.monitor.state.last_reset_at
         self.monitor.state.candidate_hits = 2
         self.monitor.state.phase = MonitorPhase.ACTIVE_CLICKING
         self.monitor.set_real_mode(True)

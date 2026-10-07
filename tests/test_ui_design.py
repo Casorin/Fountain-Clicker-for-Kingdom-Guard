@@ -45,7 +45,8 @@ class DesignTests(unittest.TestCase):
     def test_daily_reward_warning_is_under_mode_switch_and_matches_theme(self):
         from tkinter import ttk
         warning = self.design.daily_reward_warning
-        self.assertIn('Первые 100 желаний', warning.cget('text'))
+        self.assertEqual('Рекомендуемое разрешение: 1080 × 1080.', warning.cget('text'))
+        self.assertIn('1080 × 1080', warning.cget('text'))
         self.assertFalse(warning.winfo_viewable())
         self.app.mode_var.set(True)
         self.root.update()
@@ -186,6 +187,19 @@ class DesignTests(unittest.TestCase):
                          'Открыть локальное подключение', 'Android Debug Bridge (ADB)',
                          'F8', 'F9', 'Сохранить настройки'):
             self.assertIn(required, guide)
+
+    def test_click_resolution_recommendation_is_highlighted(self):
+        from app.help_window import GUIDE, GuideCard
+        from app.ui_design import PALETTES
+        text = dict(GUIDE)['Эмуляторы и разрешение']
+        paragraph = text.split('\n\n')[1]
+        self.assertIn('1080 × 1080', paragraph)
+        for theme in ('light', 'dark'):
+            card = GuideCard(self.root, paragraph, PALETTES[theme], lambda _event: None)
+            self.assertTrue(card.recommendation)
+            self.assertTrue(card.callout)
+            self.assertIn('bold', card.body.cget('font'))
+            card.destroy()
 
     def test_help_uses_current_buttons_and_connection_steps_in_first_launch(self):
         from app.help_window import GUIDE

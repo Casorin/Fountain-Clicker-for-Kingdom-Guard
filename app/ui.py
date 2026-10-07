@@ -948,6 +948,9 @@ class AppWindow:
             return
         if not self.ocr_warmup_complete:
             self._warmup_start_requested = True
+            warmup_thread = getattr(self, '_warmup_thread', None)
+            if getattr(self, 'ocr_warmup_error', None) and not (warmup_thread and warmup_thread.is_alive()):
+                self._start_ocr_warmup()
             self.status_var.set("Готовим программу. Наблюдение начнётся автоматически после подготовки.")
             return
         if self._group:
@@ -974,21 +977,33 @@ class AppWindow:
 
     def _start_ocr_warmup(self) -> None:
         self.status_var.set("Прогрев RapidOCR и PaddleOCR...")
+        config, monitor = self.config, self.monitor
+        self.ocr_warmup_complete = False
+        self.ocr_warmup_error = None
+        self.ocr_warmup_report = {}
+        self.ocr_warmup_stage = 'Загружаем распознавание'
 
         def worker() -> None:
             diagnostic = None
             try:
-                diagnostic = (self.config.runtime_dir / 'startup_warmup.log').open('a', encoding='utf-8')
-                faulthandler.dump_traceback_later(20, file=diagnostic)
-                self.ocr_warmup_stage = 'Загружаем распознавание'
-                crop_path = self.config.prize_crop_path
+                # Optional diagnostics must never prevent OCR from starting.
+                try:
+                    config.runtime_dir.mkdir(parents=True, exist_ok=True)
+                    diagnostic = (config.runtime_dir / 'startup_warmup.log').open('a', encoding='utf-8')
+                    faulthandler.dump_traceback_later(20, file=diagnostic)
+                except OSError:
+                    if diagnostic is not None:
+                        diagnostic.close()
+                    diagnostic = None
+                crop_path = config.prize_crop_path
                 if crop_path.exists():
-                    crop = Image.open(crop_path).convert("RGB")
+                    with Image.open(crop_path) as source:
+                        crop = source.convert("RGB")
                     warmup_source = str(crop_path.resolve())
                 else:
-                    crop = Image.new("RGB", (self.config.prize_crop.width, self.config.prize_crop.height), (80, 80, 80))
+                    crop = Image.new("RGB", (config.prize_crop.width, config.prize_crop.height), (80, 80, 80))
                     warmup_source = "synthetic_read_only_crop"
-                report = self.monitor._ocr_pipeline.engines.warm_up(crop)
+                report = monitor._ocr_pipeline.engines.warm_up(crop)
                 import paddleocr
                 import rapidocr
 
@@ -997,7 +1012,7 @@ class AppWindow:
                         "python": sys.executable,
                         "rapidocr_module": str(getattr(rapidocr, "__file__", "")),
                         "paddleocr_module": str(getattr(paddleocr, "__file__", "")),
-                        "pipeline": type(self.monitor._ocr_pipeline).__name__,
+                        "pipeline": type(monitor._ocr_pipeline).__name__,
                         "crop_path": warmup_source,
                     }
                 )

@@ -1,10 +1,19 @@
 import unittest
 from unittest.mock import Mock
-from scripts.bounded_click_probe import InputBudget
+from scripts.bounded_click_probe import InputBudget, select_probe_windows
+from types import SimpleNamespace
 from app.adb_client import AdbError
 
 
 class ProbeBudgetTests(unittest.TestCase):
+    def test_explicit_window_excludes_other_accounts(self):
+        windows = [SimpleNamespace(uuid='blue'), SimpleNamespace(uuid='memu')]
+        self.assertEqual(select_probe_windows(windows, 'blue'), windows[:1])
+
+    def test_missing_explicit_window_never_falls_back(self):
+        with self.assertRaises(RuntimeError):
+            select_probe_windows([SimpleNamespace(uuid='memu')], 'blue')
+
     def test_never_sends_more_than_limit(self):
         send = Mock()
         budget = InputBudget(100)

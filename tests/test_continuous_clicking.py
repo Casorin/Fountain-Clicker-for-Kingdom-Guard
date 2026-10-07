@@ -108,6 +108,43 @@ class ContinuousTests(unittest.TestCase):
         self.assertFalse(self.tick(0, frame_anchors=a)[1])
         self.assertFalse(self.monitor.state.continuous_session_active)
 
+    def test_one_missing_video_button_frame_pauses_without_resetting_series(self):
+        self.monitor._stream = object()
+        self.tick(0)
+        last_visible = self.monitor.state.session_last_visible_at
+        self.assertFalse(self.tick(.3, None, True, anchors(False, False))[1])
+        self.assertTrue(self.monitor.state.continuous_session_active)
+        self.assertEqual(self.monitor.state.session_last_visible_at, last_visible)
+        self.assertEqual(self.monitor.state.phase, MonitorPhase.ACTIVE_CLICKING)
+        self.assertTrue(self.tick(.5)[1])
+        self.assertIsNone(self.monitor.state.anchor_recovery_started_at)
+        self.monitor._stream = None
+
+    def test_missing_video_button_for_half_second_still_ends_series(self):
+        self.monitor._stream = object()
+        self.tick(0)
+        self.assertFalse(self.tick(.3, None, True, anchors(False, False))[1])
+        self.assertFalse(self.tick(.81, None, True, anchors(False, False))[1])
+        self.assertFalse(self.monitor.state.continuous_session_active)
+        self.assertEqual(self.monitor.state.phase, MonitorPhase.WAITING)
+        self.monitor._stream = None
+
+    def test_anchor_recovery_does_not_extend_hidden_fund_budget(self):
+        self.monitor._stream = object()
+        self.tick(0)
+        self.tick(1.8, None, True, anchors(False, False))
+        self.assertFalse(self.tick(2.1, None, True)[1])
+        self.assertEqual(self.monitor.state.session_last_visible_at, self.origin)
+        self.monitor._stream = None
+
+    def test_late_safe_frame_cannot_resume_old_series(self):
+        self.monitor._stream = object()
+        self.tick(0)
+        self.tick(.3, None, True, anchors(False, False))
+        self.assertFalse(self.tick(.9)[1])
+        self.assertFalse(self.monitor.state.continuous_session_active)
+        self.monitor._stream = None
+
     def test_continuation_anchors_can_bridge_covered_prize_label(self):
         self.tick(0)
         a = replace(anchors(False, True), continuation_screen_ok=True)

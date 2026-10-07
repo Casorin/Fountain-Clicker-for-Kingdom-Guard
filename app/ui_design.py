@@ -254,7 +254,7 @@ class FountainDesign:
         self.mode_switch=ModeSwitch(modes,self.choose_mode)
         self.mode_switch.pack()
         self.daily_reward_warning = ttk.Label(
-            modes, text='Первые 100 желаний за день могут идти\nс паузами из-за уведомлений о наградах.',
+            modes, text='Рекомендуемое разрешение: 1080 × 1080.',
             style='HeroWarning.TLabel', justify='center', wraplength=300)
         app.mode_var.trace_add('write', lambda *_: self.update_daily_reward_warning())
         self.update_daily_reward_warning()
@@ -835,10 +835,14 @@ class FountainDesign:
         visibility = app.ocr_var.get()
         self.visibility.set("Число временно закрыто" if "Закрыто" in visibility else "Не удалось прочитать" if "Ошибка" in visibility or "timeout" in visibility else visibility)
         p = PALETTES[self.theme]
-        preparing = hasattr(app, 'ocr_warmup_complete') and not app.ocr_warmup_complete
-        self.start_button.configure(text="Готовим / F8" if preparing else "Остановить / F8" if app.running else "Начать / F8")
+        warmup_failed = bool(getattr(app, 'ocr_warmup_error', None))
+        preparing = hasattr(app, 'ocr_warmup_complete') and not app.ocr_warmup_complete and not warmup_failed
+        self.start_button.configure(text="Повторить / F8" if warmup_failed else "Готовим / F8" if preparing else "Остановить / F8" if app.running else "Начать / F8")
         if preparing:
             self.visibility.set('Готовим программу…')
+        elif warmup_failed:
+            self.visibility.set('Ошибка подготовки')
+            self.status.set('Подготовка не завершилась. Нажмите «Повторить».')
         balance_text=app.gem_balance_var.get().replace('Баланс: ','')
         self.wallet_value.set('Пока не прочитан' if not balance_text or 'не удалось' in balance_text or 'проверяем' in balance_text else balance_text)
         if self.mode_switch.selected!=app.mode_var.get():
