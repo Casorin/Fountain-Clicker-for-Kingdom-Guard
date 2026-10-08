@@ -1,6 +1,6 @@
 # Фонтан 1.1 — для тестирования
 
-**[Мобильная версия для Android — скачать и посмотреть инструкцию](https://github.com/Casorin/Fountain-History-for-Kingdom-Guard/releases/tag/v0.5.1)**
+**[Мобильная версия для Android — скачать и посмотреть инструкцию](https://github.com/Casorin/Fountain-History-for-Kingdom-Guard/releases/tag/v0.5.2)**
 
 Отслеживает обнуления и показывает таймер и историю поверх игры. **Без автоматических кликов.**
 
