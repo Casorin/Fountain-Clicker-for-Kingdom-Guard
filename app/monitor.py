@@ -125,6 +125,7 @@ class MonitorState:
     session_reset_suspected: bool = False
     anchor_recovery_started_at: datetime | None = None
     start_requires_new_reset: bool = False
+    fast_observation_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -628,12 +629,18 @@ class PrizeMonitor:
 
     def pause(self) -> None:
         self._tap_cancel.set()
+        self.state.fast_observation_active = False
+        if hasattr(self, '_observation_activity'):
+            self._observation_activity.observe(screen_ok=False, notification=False,
+                                               balance=None, reset_at=self.state.last_reset_confirmed_at,
+                                               paused=True)
         self.state.continuous_session_active = False
         self.state.next_click_at = None
         self.state.phase = MonitorPhase.PAUSED
         self.state.last_status = "Мониторинг приостановлен"
 
     def emergency_stop(self) -> None:
+        self.state.fast_observation_active = False
         self.set_real_mode(False)
         self.state.phase = MonitorPhase.EMERGENCY_STOP
         self.state.last_status = "Аварийная остановка"
@@ -651,6 +658,7 @@ class PrizeMonitor:
 
     def reset_lock(self) -> None:
         now = self._now()
+        self.state.fast_observation_active = False
         self.state.continuous_session_active = False
         self.state.last_value = None
         self.state.raw_ocr_value = None
@@ -2048,6 +2056,17 @@ class PrizeMonitor:
         if trusted_value is not None:
             self.state.last_value = trusted_value
         self.state.last_trust_reason = trust_reason
+        from app.observation_activity import ObservationActivity
+        if not hasattr(self, '_observation_activity'):
+            self._observation_activity = ObservationActivity()
+        activity_balance = getattr(getattr(self, 'gem_guard', None), 'balance', None)
+        self.state.fast_observation_active = self._observation_activity.observe(
+            screen_ok=anchors.button_visible and (anchors.event_screen_ok or anchors.continuation_screen_ok),
+            notification=self.state.notification_veto,
+            balance=activity_balance,
+            reset_at=self.state.last_reset_confirmed_at,
+            paused=self.state.phase in {MonitorPhase.PAUSED, MonitorPhase.EMERGENCY_STOP},
+        )
         in_range = trusted_value is not None and self.is_target_value(trusted_value)
         anchors_ok = self._anchors_allow_progress(anchors)
         continuation_ok = (
@@ -2085,6 +2104,12 @@ class PrizeMonitor:
                 recognition=recognition,
                 anchors=anchors,
                 prefilter=prefilter,
+            )
+
+        if self.state.last_reset_confirmed_at != self._observation_activity.reset_at:
+            self.state.fast_observation_active = self._observation_activity.observe(
+                screen_ok=True, notification=self.state.notification_veto,
+                balance=activity_balance, reset_at=self.state.last_reset_confirmed_at,
             )
 
         if (

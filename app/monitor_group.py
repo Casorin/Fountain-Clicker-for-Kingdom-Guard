@@ -29,6 +29,7 @@ class MonitorSession:
         self.fund_waits = 0
         self.last_wait_reason = None
         self.poll_ms = None
+        self.activity_peers = ()
 
     def reset_cycle(self):
         self.request_mode(False)
@@ -143,7 +144,11 @@ class MonitorSession:
                         self.requested_real = False
                     if self.active.is_set() and not self.stopping.is_set() and not self.reset_requested.is_set():
                         self.publish(self.window.uuid, 'snapshot', snapshot)
-                    delay = .001 if self.monitor.state.phase == MonitorPhase.ACTIVE_CLICKING else self.monitor.config.poll_interval_ms/1000
+                    fast = getattr(self.monitor.state, 'fast_observation_active', False)
+                    if self.fund_source:
+                        fast = fast or any(s.active.is_set() and getattr(s.monitor.state, 'fast_observation_active', False)
+                                           for s in self.activity_peers)
+                    delay = .001 if self.monitor.state.phase == MonitorPhase.ACTIVE_CLICKING or fast else self.monitor.config.poll_interval_ms/1000
                     self.stopping.wait(delay)
                 except FreshFrameUnavailable as exc:
                     if self.fund_source:
@@ -179,6 +184,7 @@ class MonitorGroup:
         if len(entries) > 1 and all(hasattr(m, '_capture_context') for _, m in entries):
             from app.shared_fund import SharedFund
             source = next(iter(self.sessions.values()))
+            source.activity_peers = tuple(self.sessions.values())
             self.shared_fund = SharedFund(source)
             for session in self.sessions.values():
                 session.shared_fund = self.shared_fund

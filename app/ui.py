@@ -23,8 +23,8 @@ from app.single_instance import InstanceMetadata, SingleInstanceManager
 from app.stream_transport import FreshFrameUnavailable
 
 
-def poll_delay_ms(phase: MonitorPhase, normal_delay_ms: int) -> int:
-    return 1 if phase == MonitorPhase.ACTIVE_CLICKING else normal_delay_ms
+def poll_delay_ms(phase: MonitorPhase, normal_delay_ms: int, fast_observation: bool = False) -> int:
+    return 1 if phase == MonitorPhase.ACTIVE_CLICKING or fast_observation else normal_delay_ms
 
 
 def _show_existing_instance_dialog(existing: InstanceMetadata | None) -> str:
@@ -1201,7 +1201,8 @@ class AppWindow:
             self.running = False
             self._refresh_static_panels()
         if self.running:
-            self.root.after(poll_delay_ms(snapshot.phase,self.config.poll_interval_ms),self._schedule_tick)
+            self.root.after(poll_delay_ms(snapshot.phase,self.config.poll_interval_ms,
+                                         getattr(self.monitor.state, 'fast_observation_active', False)),self._schedule_tick)
 
 
 def main() -> None:
