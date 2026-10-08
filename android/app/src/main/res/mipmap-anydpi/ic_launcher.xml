@@ -1,0 +1,6 @@
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools" tools:ignore="MonochromeLauncherIcon">
+    <!-- Android 10-12; Android 13+ uses the resource in mipmap-anydpi-v33. -->
+    <background android:drawable="@drawable/ic_fountain_background" />
+    <foreground android:drawable="@drawable/ic_fountain_foreground" />
+</adaptive-icon>

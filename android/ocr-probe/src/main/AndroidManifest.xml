@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
+    <application android:label="Fountain OCR test" android:allowBackup="false" />
+    <instrumentation android:name="to.casorin.fountain.OcrProbe"
+        android:targetPackage="to.casorin.fountain.probe" />
+</manifest>

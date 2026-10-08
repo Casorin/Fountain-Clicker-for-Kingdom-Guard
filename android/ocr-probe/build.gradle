@@ -1,0 +1,23 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'to.casorin.fountain.probe'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'to.casorin.fountain.probe'
+        minSdk 29
+        targetSdk 36
+        versionCode 1
+        versionName '1'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    sourceSets.main {
+        java.srcDirs = ['src/main/java', '../app/src/main/java']
+        java.includes = ['**/OcrProbe.java', '**/FrameRecognizer.java', '**/FundPixels.java', '**/FountainGuard.java', '**/WishPixels.java']
+        assets.srcDirs = [project.findProperty('probeSamples') ?: 'src/main/assets']
+    }
+}
+dependencies { implementation 'com.google.mlkit:text-recognition:16.0.1' }

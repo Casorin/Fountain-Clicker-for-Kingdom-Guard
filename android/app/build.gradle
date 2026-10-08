@@ -1,0 +1,27 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'to.casorin.fountain'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'to.casorin.fountain'
+        minSdk 29
+        targetSdk 36
+        versionCode 6
+        versionName '0.5.1-test'
+        testInstrumentationRunner 'to.casorin.fountain.UiChecks'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { buildConfig true }
+}
+dependencies {
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
+    testImplementation 'junit:junit:4.13.2'
+}
+tasks.withType(Test).configureEach {
+    systemProperty 'fountain.sample', project.findProperty('ocrSample') ?: ''
+    systemProperty 'fountain.signalSamples', project.findProperty('signalSamples') ?: ''
+}
