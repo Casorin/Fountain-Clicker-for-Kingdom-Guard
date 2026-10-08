@@ -215,6 +215,8 @@ class LogPanel(ttk.Frame):
 class AppWindow:
     def __init__(self, root: tk.Tk, config=None, profile="default") -> None:
         self.root = root
+        from app.branding import set_window_icon
+        set_window_icon(root)
         self.profile = profile
         self.config = config or AppConfig()
         self.config = replace(self.config,stream_transport_enabled=True,
@@ -1206,6 +1208,8 @@ class AppWindow:
 
 
 def main() -> None:
+    from app.branding import set_taskbar_identity
+    set_taskbar_identity()
     from app.profiles import profile_config, profile_mutex
     parser = argparse.ArgumentParser()
     parser.add_argument('--profile', default='default')

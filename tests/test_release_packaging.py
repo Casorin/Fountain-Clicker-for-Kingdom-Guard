@@ -28,7 +28,7 @@ class ReleasePackagingTests(unittest.TestCase):
     def test_download_instructions_distinguish_player_archive_from_source(self):
         source = (ROOT/'README.md').read_text(encoding='utf-8')
         self.assertIn('Fountain-1.1-Windows.zip', source)
-        self.assertIn('Запустить Фонтан.bat', source)
+        self.assertIn('Запустить Фонтан.exe', source)
         self.assertIn('Assets', source)
         self.assertIn('Извлечь всё', source)
         self.assertIn('releases/download/v1.1/Fountain-1.1-Windows.zip', source)

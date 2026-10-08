@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import sys
+import subprocess
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +45,7 @@ def build(destination, model_cache):
     (bundle/'scripts').mkdir()
     shutil.copy2(ROOT/'scripts'/'launch_portable.py', bundle/'scripts'/'launch_portable.py')
     shutil.copy2(ROOT/'packaging'/'start.bat', bundle/'Запустить Фонтан.bat')
+    compile_launcher(bundle)
     shutil.copy2(ROOT/'packaging'/'FIRST_START.txt', bundle/'СНАЧАЛА ПРОЧИТАЙТЕ.txt')
     shutil.copy2(ROOT/'THIRD_PARTY_NOTICES.md', bundle/'THIRD_PARTY_NOTICES.md')
     manifest = {'version': APP_VERSION, 'python': sys.version.split()[0], 'files': {}}
@@ -59,6 +61,18 @@ def build(destination, model_cache):
     checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_suffix('.zip.sha256').write_text(f'{checksum}  {archive.name}\n', encoding='ascii')
     print(archive)
+
+
+def compile_launcher(bundle):
+    import os
+    compiler = Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Microsoft.NET' / 'Framework64' / 'v4.0.30319' / 'csc.exe'
+    if not compiler.exists():
+        raise FileNotFoundError('Windows .NET Framework compiler is required for the launcher')
+    subprocess.run([str(compiler), '/nologo', '/target:winexe', '/platform:anycpu',
+                    '/reference:System.Windows.Forms.dll',
+                    '/win32icon:' + str(ROOT/'assets'/'fountain.ico'),
+                    '/out:' + str(bundle/'Запустить Фонтан.exe'),
+                    str(ROOT/'packaging'/'Launcher.cs')], check=True)
 
 
 if __name__ == '__main__':
