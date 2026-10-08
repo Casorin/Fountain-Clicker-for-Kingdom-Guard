@@ -4,7 +4,7 @@
 
 Мобильное приложение «Фонтан · История» находится в отдельном репозитории.
 Оно показывает историю, прошлый фонд и таймер поверх игры, **без кликов**.
-[Скачать мобильную версию и прочитать инструкцию](https://github.com/Casorin/Fountain-History-for-Kingdom-Guard/releases/tag/v0.5.2).
+[Скачать мобильную версию и прочитать инструкцию](https://github.com/Casorin/Fountain-History-for-Kingdom-Guard/releases/tag/v0.5.3).
 
 ## Версия для Windows 1.1
 
