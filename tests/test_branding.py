@@ -15,6 +15,13 @@ class BrandingTests(unittest.TestCase):
             self.assertEqual(icon.format, 'ICO')
             self.assertTrue({(16, 16), (32, 32), (48, 48), (256, 256)} <= icon.ico.sizes())
 
+    def test_small_icon_has_transparent_corners_and_visible_fountain(self):
+        with Image.open(ICON_PATH) as icon:
+            small = icon.ico.getimage((32, 32)).convert('RGBA')
+            for point in ((0, 0), (31, 0), (0, 31), (31, 31)):
+                self.assertEqual(small.getpixel(point)[3], 0)
+            self.assertGreater(small.getpixel((16, 28))[3], 240)
+
     def test_window_icon_can_be_applied(self):
         root = tk.Tk()
         root.withdraw()
