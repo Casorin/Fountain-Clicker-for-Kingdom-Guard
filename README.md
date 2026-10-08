@@ -2,7 +2,7 @@
 
 ## Выберите, куда установить
 
-- **На телефон Android:** [скачать мобильное приложение «Фонтан · История» 0.5.1](https://github.com/Casorin/Fountain-Clicker-for-Kingdom-Guard/releases/download/android-v0.5.1/Fountain-History-0.5.1-test.apk).
+- **На телефон Android:** [скачать мобильное приложение «Фонтан · История» 0.5.1](https://github.com/Casorin/Fountain-Clicker-for-Kingdom-Guard/releases/download/android-v0.5.1/Fountain-History-0.5.1-test.apk). Отслеживает обнуления, без кликов. [Страница мобильной версии и инструкция](https://github.com/Casorin/Fountain-Clicker-for-Kingdom-Guard/releases/tag/android-v0.5.1).
 - **На компьютер Windows:** [скачать кликер «Фонтан» 1.1](https://github.com/Casorin/Fountain-Clicker-for-Kingdom-Guard/releases/download/v1.1/Fountain-1.1-Windows.zip).
 
 Обе версии тестовые. **Мобильная версия только показывает историю,
