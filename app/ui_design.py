@@ -206,6 +206,9 @@ class FountainDesign:
             app.start_method_var = tk.StringVar(value='range')
             app.start_percent_var = tk.StringVar(value='85')
         self.settings_note = tk.StringVar()
+        if not hasattr(app, 'percent_floor_enabled_var'):
+            app.percent_floor_enabled_var = tk.BooleanVar(value=False)
+            app.percent_floor_var = tk.StringVar(value='90000')
         self.saved_settings = self.settings_values()
         app.paned = ttk.PanedWindow(self.root, orient="horizontal")
         app.paned.pack(fill="both", expand=True, padx=12, pady=10)
@@ -279,10 +282,22 @@ class FountainDesign:
         ttk.Label(percent_input, text='%', style='Percent.TLabel').pack(side='left', padx=(6, 2))
         self.percent_threshold = tk.StringVar(value='Ждём новое обнуление')
         threshold_box = ttk.Frame(self.percent_box, style='Card.TFrame')
+        self.percent_threshold_box = threshold_box
         threshold_box.pack(side='left', padx=(24,0))
         ttk.Label(threshold_box, text='Начнём при фонде', style='MutedCard.TLabel').pack(anchor='w')
         ttk.Label(threshold_box, textvariable=self.percent_threshold, style='WalletValue.TLabel').pack(anchor='w',pady=(4,0))
         app.start_percent_var.trace_add('write',lambda *_:self.update_percent_preview())
+        floor_controls = ttk.Frame(self.percent_box, style='Card.TFrame')
+        floor_controls.pack(side='left', padx=(24,0), before=threshold_box)
+        self.percent_floor_check = ttk.Checkbutton(
+            floor_controls, text='Но не меньше', variable=app.percent_floor_enabled_var,
+            style='SmallWallet.Card.TCheckbutton', command=self.update_percent_preview)
+        self.percent_floor_check.pack(anchor='w')
+        self.percent_floor_entry = ttk.Entry(floor_controls, textvariable=app.percent_floor_var,
+                                           width=11, font=('Bahnschrift',13,'bold'))
+        self.percent_floor_entry.pack(anchor='w', pady=(4,0))
+        for variable in (app.percent_floor_enabled_var, app.percent_floor_var):
+            variable.trace_add('write', lambda *_: (self.update_percent_preview(), self.update_settings_hint()))
         entries = ttk.Frame(card, style="Card.TFrame")
         self.range_entries = entries
         entries.pack(fill="x", pady=(2, 2))
@@ -522,6 +537,15 @@ class FountainDesign:
             self.history_splitter.sashpos(0,settings.winfo_reqheight())
 
     def update_percent_preview(self):
+        enabled = self.app.percent_floor_enabled_var.get()
+        self.percent_floor_entry.configure(state='normal' if enabled else 'disabled')
+        try:
+            floor = int(self.app.percent_floor_var.get().replace(' ', '').strip()) if enabled else 0
+            if floor < 0:
+                raise ValueError
+        except ValueError:
+            self.percent_threshold.set('Укажите минимальный фонд')
+            return
         monitor=getattr(self.app,'monitor',None)
         latest=getattr(monitor,'_latest_percentage_reset',None)
         event=latest() if callable(latest) else None
@@ -536,6 +560,7 @@ class FountainDesign:
             valid=datetime.fromisoformat(event.timestamp_reset).timestamp()>=after.timestamp()
         if valid and 1<=percent<=100:
             threshold=(event.peak_before_reset*percent+99)//100
+            threshold=max(threshold,floor)
             self.percent_threshold.set(f'{threshold:,}'.replace(',',' '))
         else:
             self.percent_threshold.set('Ждём новое обнуление' if 1<=percent<=100 else 'Укажите от 1 до 100%')
@@ -550,7 +575,8 @@ class FountainDesign:
                 return value
         return (number(app.test_range_min_var),number(app.test_range_max_var),app.no_upper_var.get(),
                 app.gem_limit_enabled_var.get(),number(app.gem_floor_var) if app.gem_limit_enabled_var.get() else None,
-                app.start_method_var.get(), number(app.start_percent_var))
+                app.start_method_var.get(), number(app.start_percent_var),
+                number(app.percent_floor_var) if app.percent_floor_enabled_var.get() else None)
 
     def update_settings_hint(self):
         pending=self.settings_values()!=self.saved_settings
@@ -737,6 +763,24 @@ class FountainDesign:
             s.element_create(wallet_check,'image',images[0],('selected',images[1]),sticky='')
         s.layout('Wallet.Card.TCheckbutton',[(wallet_check,{'side':'left'}),('Checkbutton.padding',{'sticky':'nsew','children':[
             ('Checkbutton.label',{'sticky':'nsew'})]})])
+        s.configure('SmallWallet.Card.TCheckbutton', background=p['card'], foreground=p['text'],
+                    font=('Trebuchet MS',9))
+        s.map('SmallWallet.Card.TCheckbutton', background=[('active',p['card'])])
+        small_check = f'Fountain.{self.theme}.SmallWalletCheck'
+        if small_check not in s.element_names():
+            images=[]
+            for selected in (False,True):
+                im=Image.new('RGB',(16,16),p['card'])
+                pen=ImageDraw.Draw(im)
+                pen.rounded_rectangle((1,1,14,14),radius=3,
+                                      fill=p['pink'] if selected else p['entry'],outline=p['pink'])
+                if selected:
+                    pen.line((4,8,7,11,12,4),fill='white',width=2)
+                images.append(ImageTk.PhotoImage(im,master=self.root))
+            self.theme_images[small_check]=images
+            s.element_create(small_check,'image',images[0],('selected',images[1]),sticky='')
+        s.layout('SmallWallet.Card.TCheckbutton',[(small_check,{'side':'left'}),
+            ('Checkbutton.padding',{'sticky':'nsew','children':[('Checkbutton.label',{'sticky':'nsew'})]})])
         for name in ("Primary.TButton", "Selected.TButton"):
             s.configure(name, background=p["pink"], foreground="#141b45", bordercolor=p["pink"], padding=(18, 4))
             s.map(name, background=[("active", p["hover"])], foreground=[("active", "#141b45")])

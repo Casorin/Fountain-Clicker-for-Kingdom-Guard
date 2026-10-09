@@ -118,6 +118,7 @@ class UserRangeConfig:
     minimum_gems: int | None = None
     start_method: str = "range"
     start_percent: int = 85
+    percent_minimum_prize: int | None = None
 
     @classmethod
     def load(cls, path: Path, default_min: int, default_max: int) -> "UserRangeConfig":
@@ -140,7 +141,9 @@ class UserRangeConfig:
         return cls(test_min_prize=test_min, test_max_prize=test_max,
                    no_upper_limit=data.get("no_upper_limit") is True, minimum_gems=floor,
                    start_method="percent" if data.get("start_method") == "percent" else "range",
-                   start_percent=percent)
+                   start_percent=percent,
+                   percent_minimum_prize=data.get('percent_minimum_prize')
+                   if type(data.get('percent_minimum_prize')) is int and data['percent_minimum_prize'] >= 0 else None)
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -151,6 +154,7 @@ class UserRangeConfig:
             "minimum_gems": self.minimum_gems,
             "start_method": self.start_method,
             "start_percent": self.start_percent,
+            "percent_minimum_prize": self.percent_minimum_prize,
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 

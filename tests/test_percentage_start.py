@@ -7,6 +7,29 @@ from tests.test_in_range_confirmation import InRangeConfirmationTests, anchors
 
 
 class PercentageStartTests(unittest.TestCase):
+    def test_optional_minimum_uses_larger_of_percentage_and_amount(self):
+        self.monitor.user_range = replace(self.monitor.user_range, start_percent=80, percent_minimum_prize=90000)
+        self.assertEqual(self.monitor.percentage_start_threshold(), 90000)
+        self.assertFalse(self.monitor.is_target_value(89999))
+        self.assertTrue(self.monitor.is_target_value(90000))
+        self.monitor.reset_history[0].peak_before_reset = 200000
+        self.assertEqual(self.monitor.percentage_start_threshold(), 160000)
+
+    def test_minimum_does_not_bypass_missing_reset_or_cooldown(self):
+        self.monitor.user_range = replace(self.monitor.user_range, percent_minimum_prize=90000)
+        self.monitor.reset_history = []
+        self.assertIsNone(self.monitor.percentage_start_threshold())
+
+    def test_minimum_setting_round_trip_disable_and_invalid_value(self):
+        m = self.monitor
+        self.assertTrue(m.update_test_range(35000, 500000, percent_minimum_prize=90000, update_percent_minimum=True)[0])
+        loaded = UserRangeConfig.load(m.config.user_config_path, 1, 2)
+        self.assertEqual(loaded.percent_minimum_prize, 90000)
+        self.assertFalse(m.update_test_range(35000, 500000, percent_minimum_prize=-1, update_percent_minimum=True)[0])
+        self.assertTrue(m.update_test_range(35000, 500000, percent_minimum_prize=None, update_percent_minimum=True)[0])
+        self.assertIsNone(m.user_range.percent_minimum_prize)
+        self.assertEqual(m.percentage_start_threshold(), 85000)
+
     def setUp(self):
         InRangeConfirmationTests.setUp(self)
         self.addCleanup(self.temp_dir.cleanup)

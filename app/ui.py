@@ -312,6 +312,8 @@ class AppWindow:
         self.no_upper_var = tk.BooleanVar(value=self.monitor.user_range.no_upper_limit)
         self.start_method_var = tk.StringVar(value=self.monitor.user_range.start_method)
         self.start_percent_var = tk.StringVar(value=str(self.monitor.user_range.start_percent))
+        self.percent_floor_enabled_var = tk.BooleanVar(value=self.monitor.user_range.percent_minimum_prize is not None)
+        self.percent_floor_var = tk.StringVar(value=str(self.monitor.user_range.percent_minimum_prize or 90000))
         self.gem_limit_enabled_var = tk.BooleanVar(value=self.monitor.user_range.minimum_gems is not None)
         self.gem_floor_var = tk.StringVar(value=f"{self.monitor.user_range.minimum_gems if self.monitor.user_range.minimum_gems is not None else 40000:,}".replace(',',' '))
         self.gem_balance_var = tk.StringVar(value="Баланс: проверяем")
@@ -399,6 +401,8 @@ class AppWindow:
             max_value = int(self.test_range_max_var.get().replace(" ", "").strip())
             gem_floor = int(self.gem_floor_var.get().replace(" ", "").strip()) if self.gem_limit_enabled_var.get() else None
             start_percent = int(self.start_percent_var.get().strip())
+            percent_floor = (int(self.percent_floor_var.get().replace(' ', '').strip())
+                             if getattr(self, 'percent_floor_enabled_var', None) and self.percent_floor_enabled_var.get() else None)
         except ValueError:
             messagebox.showerror("Ошибка настроек", "Значения фонда, процент и остаток самоцветов должны быть целыми числами.")
             return False
@@ -407,6 +411,8 @@ class AppWindow:
             range_text = (f"{start_percent}% от фонда перед последним обнулением" if self.start_method_var.get() == 'percent'
                           else f"от {min_value:,}, без верхнего предела" if self.no_upper_var.get()
                           else f"{min_value:,} - {max_value:,}")
+            if self.start_method_var.get() == 'percent' and percent_floor is not None:
+                range_text += f", но не меньше {percent_floor:,}"
             approved = messagebox.askyesno(
                 "Перейти на новое правило кликов?",
                 "Сейчас включены настоящие клики.\n"
@@ -423,7 +429,8 @@ class AppWindow:
 
         ok, message = self.monitor.update_test_range(min_value, max_value,
             no_upper_limit=self.no_upper_var.get(), minimum_gems=gem_floor, update_gem_limit=True,
-            start_method=self.start_method_var.get(), start_percent=start_percent)
+            start_method=self.start_method_var.get(), start_percent=start_percent,
+            percent_minimum_prize=percent_floor, update_percent_minimum=True)
         if not ok:
             messagebox.showerror("Ошибка диапазона", message)
             return False

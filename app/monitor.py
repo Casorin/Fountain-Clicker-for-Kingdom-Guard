@@ -740,14 +740,19 @@ class PrizeMonitor:
         if after is not None and datetime.fromisoformat(event.timestamp_reset).timestamp() < after.timestamp():
             return None
         # Round up: never start below the selected percentage.
-        return (event.peak_before_reset * self.user_range.start_percent + 99) // 100
+        threshold = (event.peak_before_reset * self.user_range.start_percent + 99) // 100
+        return max(threshold, self.user_range.percent_minimum_prize or 0)
 
     def editable_test_range_label(self) -> str:
         return self.target_range_label()
 
     def update_test_range(self, min_value: int, max_value: int, *, no_upper_limit: bool | None = None,
                           minimum_gems: int | None = None, update_gem_limit: bool = False,
-                          start_method: str | None = None, start_percent: int | None = None) -> tuple[bool, str]:
+                          start_method: str | None = None, start_percent: int | None = None,
+                          percent_minimum_prize: int | None = None,
+                          update_percent_minimum: bool = False) -> tuple[bool, str]:
+        if update_percent_minimum and percent_minimum_prize is not None and (type(percent_minimum_prize) is not int or percent_minimum_prize < 0):
+            return False, "Минимальный фонд должен быть целым неотрицательным числом"
         if start_method is not None and start_method not in {"range", "percent"}:
             return False, "Выберите начало по диапазону или по проценту"
         if start_percent is not None and (type(start_percent) is not int or not 1 <= start_percent <= 100):
@@ -765,7 +770,8 @@ class PrizeMonitor:
                                   no_upper_limit=self.user_range.no_upper_limit if no_upper_limit is None else no_upper_limit,
                                   minimum_gems=minimum_gems if update_gem_limit else self.user_range.minimum_gems,
                                   start_method=start_method or self.user_range.start_method,
-                                  start_percent=start_percent if start_percent is not None else self.user_range.start_percent)
+                                  start_percent=start_percent if start_percent is not None else self.user_range.start_percent,
+                                  percent_minimum_prize=percent_minimum_prize if update_percent_minimum else self.user_range.percent_minimum_prize)
         self.user_range.save(self.config.user_config_path)
         self.state.continuous_session_active = False
         self._clear_candidate()

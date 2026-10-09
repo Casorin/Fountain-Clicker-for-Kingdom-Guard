@@ -355,6 +355,38 @@ class DesignTests(unittest.TestCase):
         self.assertTrue(self.design.slider.winfo_ismapped())
         self.assertTrue(self.design.percent_entry.instate(['disabled']))
 
+    def test_percent_minimum_preview_and_unsaved_hint(self):
+        event=SimpleNamespace(peak_before_reset=100000)
+        self.app.monitor=SimpleNamespace(_latest_percentage_reset=lambda:event)
+        self.app.start_method_var.set('percent')
+        self.app.start_percent_var.set('80')
+        self.app.percent_floor_var.set('90 000')
+        self.app.percent_floor_enabled_var.set(True)
+        self.root.update()
+        self.assertEqual(self.design.percent_threshold.get(),'90 000')
+        self.assertIn('ещё не применены',self.design.settings_note.get())
+        self.assertFalse(self.design.percent_floor_entry.instate(['disabled']))
+        self.app.percent_floor_enabled_var.set(False)
+        self.root.update()
+        self.assertEqual(self.design.percent_threshold.get(),'80 000')
+        self.assertTrue(self.design.percent_floor_entry.instate(['disabled']))
+
+    def test_percent_minimum_is_left_of_threshold_and_has_small_card_checkbox(self):
+        from tkinter import ttk
+        from app.ui_design import PALETTES
+        self.app.start_method_var.set('percent')
+        self.root.update()
+        check=self.design.percent_floor_check
+        self.assertLess(check.winfo_rootx(),self.design.percent_threshold_box.winfo_rootx())
+        self.assertEqual(check.cget('style'),'SmallWallet.Card.TCheckbutton')
+        for theme in ('light','dark'):
+            self.design.theme=theme
+            self.design.apply_theme()
+            style=ttk.Style(self.root)
+            self.assertEqual(style.lookup('SmallWallet.Card.TCheckbutton','background'),PALETTES[theme]['card'])
+            image=self.design.theme_images[f'Fountain.{theme}.SmallWalletCheck'][0]
+            self.assertEqual((image.width(),image.height()),(16,16))
+
     def test_percent_preview_uses_draft_percent_not_saved_range(self):
         event=SimpleNamespace(peak_before_reset=100000)
         self.app.monitor=SimpleNamespace(_latest_percentage_reset=lambda:event)
