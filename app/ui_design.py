@@ -206,6 +206,8 @@ class FountainDesign:
             app.start_method_var = tk.StringVar(value='range')
             app.start_percent_var = tk.StringVar(value='85')
         self.settings_note = tk.StringVar()
+        if not hasattr(app, 'click_speed_var'):
+            app.click_speed_var = tk.StringVar(value='5')
         if not hasattr(app, 'percent_floor_enabled_var'):
             app.percent_floor_enabled_var = tk.BooleanVar(value=False)
             app.percent_floor_var = tk.StringVar(value='90000')
@@ -345,13 +347,19 @@ class FountainDesign:
         ttk.Label(balance_box,textvariable=self.wallet_value,style='WalletValue.TLabel').pack(anchor='e')
         save_row=ttk.Frame(card,style='Card.TFrame')
         save_row.pack(fill='x',pady=(2,2))
-        self.settings_hint=ttk.Label(save_row,textvariable=self.settings_note,style='MutedCard.TLabel',wraplength=500)
+        speed_box = ttk.Frame(save_row, style='Card.TFrame')
+        speed_box.pack(side='left', padx=(0, 12))
+        ttk.Label(speed_box, text='Кликов в секунду', style='MutedCard.TLabel').pack(side='left', padx=(0, 6))
+        self.click_speed_input = ttk.Spinbox(speed_box, textvariable=app.click_speed_var,
+                                           from_=1, to=10, width=3, font=('Bahnschrift', 11))
+        self.click_speed_input.pack(side='left')
+        self.settings_hint=ttk.Label(save_row,textvariable=self.settings_note,style='MutedCard.TLabel',wraplength=270)
         self.settings_hint.pack(side='left', fill='x', expand=True)
         self.save_button=ttk.Button(save_row,text='Сохранить настройки',style='Save.TButton',command=app.apply_range)
         self.save_button.pack(side='right')
         ttk.Separator(card).pack(fill='x',pady=(2,4))
         for variable in (app.test_range_min_var,app.test_range_max_var,app.no_upper_var,
-                         app.gem_limit_enabled_var,app.gem_floor_var,app.start_method_var,app.start_percent_var):
+                         app.gem_limit_enabled_var,app.gem_floor_var,app.start_method_var,app.start_percent_var,app.click_speed_var):
             variable.trace_add('write',lambda *_: self.update_settings_hint())
         self.update_settings_hint()
         controls = ttk.Frame(card, style="Card.TFrame")
@@ -534,6 +542,7 @@ class FountainDesign:
         panes=self.history_splitter.panes()
         if panes and self.history_splitter.winfo_ismapped():
             settings=self.history_splitter.nametowidget(panes[0])
+            settings.update_idletasks()
             self.history_splitter.sashpos(0,settings.winfo_reqheight())
 
     def update_percent_preview(self):
@@ -576,17 +585,18 @@ class FountainDesign:
         return (number(app.test_range_min_var),number(app.test_range_max_var),app.no_upper_var.get(),
                 app.gem_limit_enabled_var.get(),number(app.gem_floor_var) if app.gem_limit_enabled_var.get() else None,
                 app.start_method_var.get(), number(app.start_percent_var),
-                number(app.percent_floor_var) if app.percent_floor_enabled_var.get() else None)
+                number(app.percent_floor_var) if app.percent_floor_enabled_var.get() else None,
+                number(app.click_speed_var))
 
     def update_settings_hint(self):
         pending=self.settings_values()!=self.saved_settings
-        self.settings_note.set('Изменения ещё не применены. Нажмите «Сохранить настройки».' if pending else
-            'Изменения вступят в силу после сохранения.')
+        self.settings_note.set('Изменения ещё не применены.\nНажмите «Сохранить настройки».' if pending else
+            'После изменения нажмите\n«Сохранить настройки».')
         self.settings_hint.configure(style='Pending.TLabel' if pending else 'MutedCard.TLabel')
 
     def mark_saved(self):
         self.saved_settings=self.settings_values()
-        self.settings_note.set('Настройки сохранены. Всё готово к наблюдению.')
+        self.settings_note.set('Настройки сохранены.\nВсё готово к наблюдению.')
         self.settings_hint.configure(style='MutedCard.TLabel')
 
     def toggle_details(self):

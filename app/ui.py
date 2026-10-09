@@ -220,7 +220,7 @@ class AppWindow:
         self.profile = profile
         self.config = config or AppConfig()
         self.config = replace(self.config,stream_transport_enabled=True,
-                              continuous_click_interval_seconds=.125,continuous_max_taps=0)
+                              continuous_max_taps=0)
         self._base_config = self.config
         from app.profiles import DeviceLeases
         self._device_leases = DeviceLeases(AppConfig().runtime_dir / 'device_owners')
@@ -312,6 +312,7 @@ class AppWindow:
         self.no_upper_var = tk.BooleanVar(value=self.monitor.user_range.no_upper_limit)
         self.start_method_var = tk.StringVar(value=self.monitor.user_range.start_method)
         self.start_percent_var = tk.StringVar(value=str(self.monitor.user_range.start_percent))
+        self.click_speed_var = tk.StringVar(value=str(self.monitor.user_range.clicks_per_second))
         self.percent_floor_enabled_var = tk.BooleanVar(value=self.monitor.user_range.percent_minimum_prize is not None)
         self.percent_floor_var = tk.StringVar(value=str(self.monitor.user_range.percent_minimum_prize or 90000))
         self.gem_limit_enabled_var = tk.BooleanVar(value=self.monitor.user_range.minimum_gems is not None)
@@ -401,10 +402,11 @@ class AppWindow:
             max_value = int(self.test_range_max_var.get().replace(" ", "").strip())
             gem_floor = int(self.gem_floor_var.get().replace(" ", "").strip()) if self.gem_limit_enabled_var.get() else None
             start_percent = int(self.start_percent_var.get().strip())
+            click_speed = int(self.click_speed_var.get().strip()) if hasattr(self, 'click_speed_var') else 5
             percent_floor = (int(self.percent_floor_var.get().replace(' ', '').strip())
                              if getattr(self, 'percent_floor_enabled_var', None) and self.percent_floor_enabled_var.get() else None)
         except ValueError:
-            messagebox.showerror("Ошибка настроек", "Значения фонда, процент и остаток самоцветов должны быть целыми числами.")
+            messagebox.showerror("Ошибка настроек", "Значения фонда, процент, скорость кликов и остаток самоцветов должны быть целыми числами.")
             return False
 
         if self.mode_var.get():
@@ -417,6 +419,7 @@ class AppWindow:
                 "Перейти на новое правило кликов?",
                 "Сейчас включены настоящие клики.\n"
                 f"Новое правило: {range_text}.\n".replace(',',' ')
+                + f"Скорость: до {click_speed} кликов в секунду на окно.\n"
                 + (f"Оставить на счёте не меньше {gem_floor:,} самоцветов.\n".replace(',',' ') if gem_floor is not None else "Ограничение остатка выключено.\n")
                 +
                 "После подтверждения настройки будут сохранены.\n"
@@ -430,7 +433,8 @@ class AppWindow:
         ok, message = self.monitor.update_test_range(min_value, max_value,
             no_upper_limit=self.no_upper_var.get(), minimum_gems=gem_floor, update_gem_limit=True,
             start_method=self.start_method_var.get(), start_percent=start_percent,
-            percent_minimum_prize=percent_floor, update_percent_minimum=True)
+            percent_minimum_prize=percent_floor, update_percent_minimum=True,
+            clicks_per_second=click_speed)
         if not ok:
             messagebox.showerror("Ошибка диапазона", message)
             return False

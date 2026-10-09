@@ -10,6 +10,12 @@ from app.monitor import MonitorPhase, OcrStatus, PrizeMonitor
 
 
 class ContinuousTests(unittest.TestCase):
+    def test_saved_speed_controls_minimum_tap_interval(self):
+        self.monitor.user_range = replace(self.monitor.user_range, clicks_per_second=2)
+        self.assertTrue(self.tick(0)[1])
+        self.assertFalse(self.tick(.3)[1])
+        self.assertTrue(self.tick(.5)[1])
+
     def setUp(self):
         confirmation.InRangeConfirmationTests.setUp(self)
         self.monitor.config = replace(self.monitor.config, continuous_clicking=True)

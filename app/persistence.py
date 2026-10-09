@@ -119,6 +119,7 @@ class UserRangeConfig:
     start_method: str = "range"
     start_percent: int = 85
     percent_minimum_prize: int | None = None
+    clicks_per_second: int = 5
 
     @classmethod
     def load(cls, path: Path, default_min: int, default_max: int) -> "UserRangeConfig":
@@ -138,7 +139,11 @@ class UserRangeConfig:
         percent = data.get("start_percent", 85)
         if type(percent) is not int or not 1 <= percent <= 100:
             percent = 85
+        speed = data.get('clicks_per_second', 5)
+        if type(speed) is not int or not 1 <= speed <= 10:
+            speed = 5
         return cls(test_min_prize=test_min, test_max_prize=test_max,
+                   clicks_per_second=speed,
                    no_upper_limit=data.get("no_upper_limit") is True, minimum_gems=floor,
                    start_method="percent" if data.get("start_method") == "percent" else "range",
                    start_percent=percent,
@@ -155,6 +160,7 @@ class UserRangeConfig:
             "start_method": self.start_method,
             "start_percent": self.start_percent,
             "percent_minimum_prize": self.percent_minimum_prize,
+            "clicks_per_second": self.clicks_per_second,
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 

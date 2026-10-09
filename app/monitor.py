@@ -750,7 +750,10 @@ class PrizeMonitor:
                           minimum_gems: int | None = None, update_gem_limit: bool = False,
                           start_method: str | None = None, start_percent: int | None = None,
                           percent_minimum_prize: int | None = None,
-                          update_percent_minimum: bool = False) -> tuple[bool, str]:
+                          update_percent_minimum: bool = False,
+                          clicks_per_second: int | None = None) -> tuple[bool, str]:
+        if clicks_per_second is not None and (type(clicks_per_second) is not int or not 1 <= clicks_per_second <= 10):
+            return False, "Скорость должна быть целым числом от 1 до 10 кликов в секунду"
         if update_percent_minimum and percent_minimum_prize is not None and (type(percent_minimum_prize) is not int or percent_minimum_prize < 0):
             return False, "Минимальный фонд должен быть целым неотрицательным числом"
         if start_method is not None and start_method not in {"range", "percent"}:
@@ -767,6 +770,7 @@ class PrizeMonitor:
         if update_gem_limit and minimum_gems is not None and (type(minimum_gems) is not int or minimum_gems < 0):
             return False, "Остаток самоцветов должен быть целым неотрицательным числом"
         self.user_range = replace(self.user_range, test_min_prize=min_value, test_max_prize=max_value,
+                                  clicks_per_second=clicks_per_second if clicks_per_second is not None else self.user_range.clicks_per_second,
                                   no_upper_limit=self.user_range.no_upper_limit if no_upper_limit is None else no_upper_limit,
                                   minimum_gems=minimum_gems if update_gem_limit else self.user_range.minimum_gems,
                                   start_method=start_method or self.user_range.start_method,
@@ -1867,7 +1871,7 @@ class PrizeMonitor:
             return clicked, would_tap, diagnostics_dir
 
         actual_now = self._now()
-        interval = (self.config.continuous_click_interval_seconds if continuous
+        interval = (1.0 / self.user_range.clicks_per_second if continuous
                     else self.config.click_interval_seconds)
         frame_age = (
             (actual_now - self._latest_capture_completed_at).total_seconds()
