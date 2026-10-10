@@ -2,11 +2,22 @@ import queue
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from app.adb_client import AdbClient, AdbError
 
 
 class AckTests(unittest.TestCase):
+    def test_read_only_adb_commands_do_not_open_console(self):
+        import subprocess
+        client = AdbClient(Path('unused-adb'), 'unused-device')
+        result = SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+        with patch('app.memory_guard.low_memory_message', return_value=None), \
+             patch('app.adb_client.subprocess.run', return_value=result) as run:
+            client.devices()
+        self.assertEqual(run.call_args.kwargs['creationflags'],
+                         getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        self.assertEqual(run.call_args.args[0], ['unused-adb', 'devices'])
+
     def make_client(self, reply):
         client=AdbClient(Path('unused-adb'), 'unused-device')
         writes=[]

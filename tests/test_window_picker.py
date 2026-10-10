@@ -34,6 +34,12 @@ class PickerTests(unittest.TestCase):
         self.picker.choose()
         self.callback.assert_called_once_with([self.window])
 
+    def test_disabled_choose_button_explains_missing_checkmarks(self):
+        self.picker.checked.clear()
+        self.picker.explain_disabled_choice()
+        self.assertIn('Поставьте галочку', self.picker.status.get())
+        self.callback.assert_not_called()
+
     def test_preview_error_is_retained_after_clicking_checkbox(self):
         from types import SimpleNamespace
         message = 'Нет подключения к эмулятору. Включите локальную отладку ADB.'

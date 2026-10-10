@@ -240,13 +240,13 @@ class AppWindow:
                 self._selected_windows = resolve_selections(self._selection_path, self.config.adb_path)
                 self._selected_window = self._selected_windows[0] if self._selected_windows else None
                 if self._selected_window is None:
-                    self._selection_error = 'Выбранное окно MEmu закрыто. Нажмите «Выбрать окно».'
+                    self._selection_error = 'Выбранное окно эмулятора закрыто. Откройте эмулятор и нажмите «Выбрать окно эмулятора».'
                 else:
                     self.config = config_for_window(self._base_config, self._selected_window)
             except Exception:
                 self._selection_error = 'Не удалось проверить выбранное окно. Нажмите «Выбрать окно».'
-        elif profile != 'default':
-            self._selection_error = 'Нажмите «Выбрать окно», чтобы подключить MEmu к этому окну программы.'
+        else:
+            self._selection_error = 'Сначала нажмите «Выбрать окно эмулятора» и отметьте нужные аккаунты.'
         if not self._selection_error:
             try:
                 serials = ([identity for w in self._selected_windows for identity in (w.serial, 'device:' + w.uuid)]
@@ -341,8 +341,13 @@ class AppWindow:
         self.root.bind("<F9>", lambda _event: self.emergency_stop())
 
     def _sync_mode(self) -> None:
-        if self._switching_window or self._window_picker_active or self._selection_error:
+        from app.user_guidance import action_block_reason
+        reason = action_block_reason(self)
+        if reason:
+            requested = self.mode_var.get()
             self.mode_var.set(False)
+            if requested:
+                AppWindow._show_action_help(self, 'Клики пока не включены', reason)
             return
         enabled = self.mode_var.get()
         if enabled:
@@ -409,6 +414,10 @@ class AppWindow:
             messagebox.showerror("Ошибка настроек", "Значения фонда, процент, скорость кликов и остаток самоцветов должны быть целыми числами.")
             return False
 
+        if not 1 <= click_speed <= 10:
+            AppWindow._show_action_help(self, 'Проверьте скорость', 'Укажите целое число от 1 до 10 в поле «Кликов в секунду», затем сохраните настройки.')
+            return False
+
         if self.mode_var.get():
             range_text = (f"{start_percent}% от фонда перед последним обнулением" if self.start_method_var.get() == 'percent'
                           else f"от {min_value:,}, без верхнего предела" if self.no_upper_var.get()
@@ -458,6 +467,7 @@ class AppWindow:
 
     def choose_window(self) -> None:
         if self._switching_window or self._window_picker_active:
+            AppWindow._show_action_help(self, 'Выбор окна', 'Окно выбора уже открыто или ещё идёт подключение. Завершите выбор или подождите подключения.')
             return
         self._window_picker_active = True
         from app.window_picker import WindowPicker
@@ -477,7 +487,8 @@ class AppWindow:
                              cwd=str(Path(__file__).resolve().parents[1]),
                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         except OSError as exc:
-            messagebox.showerror('Не удалось открыть окно', str(exc), parent=self.root)
+            self._append_log(str(exc))
+            AppWindow._show_action_help(self, 'Не удалось открыть окно', 'Проверьте, что архив полностью распакован и файлы программы не перемещены по отдельности. Если ошибка повторяется, отправьте технический отчёт.')
 
     def _select_windows(self, windows) -> None:
         current = {(w.uuid, w.serial) for w in self._selected_windows}
@@ -614,6 +625,8 @@ class AppWindow:
                             self._refresh_static_panels()
                     if kind == 'error':
                         self._append_log(f'[{self._group.sessions[uuid].window.name}] {payload}')
+                        from app.connection_diagnostics import preview_error_message
+                        self._session_statuses[uuid] = 'Ошибка подключения: ' + preview_error_message(RuntimeError(payload))
             self.running = self._group.any_active
             self.mode_var.set(self._group.any_real)
             self._update_group_table()
@@ -687,7 +700,7 @@ class AppWindow:
             return
         item_id = selection[0]
         if item_id == "placeholder" or not item_id.startswith("event-"):
-            messagebox.showwarning("Удаление записи", "Для удаления нужно выбрать реальную production-запись.")
+            messagebox.showwarning("Удаление записи", "Сначала нажмите на строку обнуления в таблице. Заголовок и сообщение о пустой истории удалить нельзя.")
             return
         try:
             visible_index = int(item_id.split("-", 1)[1])
@@ -706,7 +719,7 @@ class AppWindow:
             "Удалить запись обнуления?\n\n"
             f"Время: {datetime.fromisoformat(event.timestamp_reset).astimezone(self.monitor._local_zone()).strftime('%H:%M:%S')}\n"
             f"Пик перед обнулением: {peak_text}\n\n"
-            "Это действие удалит запись из production-истории.",
+            "Эта запись будет удалена из истории обнулений.",
             icon="warning",
         )
         if not approved:
@@ -721,11 +734,11 @@ class AppWindow:
 
     def clear_all_history(self) -> None:
         if not self.monitor.reset_history:
-            messagebox.showinfo("Очистка истории", "Production-история уже пуста.")
+            messagebox.showinfo("Очистка истории", "История уже пуста. Записи появятся после обнулений, которые программа заметит во время наблюдения.")
             return
         approved = messagebox.askyesno(
             "Очистить всю историю",
-            "Вы действительно хотите удалить ВСЮ production-историю обнулений?\n\n"
+            "Удалить все записи из истории обнулений?\n\n"
             "Будут удалены все записи из пользовательской статистики.\n"
             "Перед удалением будет создана резервная копия.",
             icon="warning",
@@ -950,9 +963,15 @@ class AppWindow:
         else:
             self.start()
 
+    def _show_action_help(self, title, message):
+        self.status_var.set(message)
+        messagebox.showinfo(title, message, parent=getattr(self, 'root', None))
+
     def start(self) -> None:
-        if self._switching_window or self._window_picker_active or self._selection_error or getattr(self, '_window_close_started', False):
-            self.status_var.set(self._selection_error or 'Сначала завершите выбор окна MEmu.')
+        from app.user_guidance import action_block_reason
+        reason = action_block_reason(self)
+        if reason:
+            AppWindow._show_action_help(self, 'Пока не можем начать', reason)
             return
         if self.running:
             if self._group:
@@ -980,6 +999,8 @@ class AppWindow:
             self.connection_var.set(message)
             if not ok:
                 self.status_var.set(message)
+                from app.connection_diagnostics import preview_error_message
+                AppWindow._show_action_help(self, 'Не удалось подключиться', preview_error_message(RuntimeError(message)))
                 return
         self.monitor.resume()
         self.running = True
@@ -1125,6 +1146,11 @@ class AppWindow:
         self._write_runtime_status()
 
     def reset_lock(self) -> None:
+        from app.user_guidance import action_block_reason
+        reason = action_block_reason(self)
+        if reason:
+            AppWindow._show_action_help(self, 'Сначала подключите окно', reason)
+            return
         approved = messagebox.askyesno(
             'Ждать новое обнуление',
             'Начать новый период наблюдения для всех выбранных окон?\n\n'
@@ -1204,9 +1230,11 @@ class AppWindow:
                 self.root.after(100,self._schedule_tick)
                 return
             self.pause()
-            self.status_var.set("Ошибка мониторинга")
+            from app.connection_diagnostics import preview_error_message
+            help_text = preview_error_message(self._poll_error)
+            self.status_var.set(help_text)
             self._append_log(f"Ошибка: {self._poll_error}")
-            messagebox.showerror("Мониторинг приостановлен", str(self._poll_error))
+            messagebox.showerror("Мониторинг приостановлен", help_text, parent=self.root)
             return
         snapshot = self._poll_result
         if snapshot is None:

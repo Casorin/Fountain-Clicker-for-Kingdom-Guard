@@ -17,7 +17,7 @@ def read_command(arguments):
 
 def inventory():
     script = """$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new();
-$p=@(Get-CimInstance Win32_Process | Where-Object {$_.Name -in 'dnplayer.exe','HD-Player.exe'} |
+$p=@(Get-CimInstance Win32_Process | Where-Object {$_.Name -in 'dnplayer.exe','HD-Player.exe','MEmu.exe','MEmuHeadless.exe'} |
  Select-Object ProcessId,Name,ExecutablePath);
 $t=@(Get-NetTCPConnection -State Listen | Select-Object LocalAddress,LocalPort,OwningProcess);
 @{processes=$p;ports=$t} | ConvertTo-Json -Depth 4 -Compress"""
@@ -99,6 +99,18 @@ def blue_windows(processes, ports):
     return []
 
 
-def discover_extra_windows():
-    data = inventory()
-    return ld_windows(data['processes'], data['ports']) + blue_windows(data['processes'], data['ports'])
+def discover_extra_windows(data=None, diagnostics=None):
+    data = inventory() if data is None else data
+    windows = []
+    from app.connection_diagnostics import preview_error_message
+    for provider, discover in (('LDPlayer', ld_windows), ('BlueStacks', blue_windows)):
+        try:
+            found = discover(data.get('processes', []), data.get('ports', []))
+            windows.extend(found)
+            process_name = 'dnplayer.exe' if provider == 'LDPlayer' else 'hd-player.exe'
+            if not found and diagnostics is not None and any(p.get('Name', '').lower() == process_name for p in data.get('processes', [])):
+                diagnostics.append((provider, 'Эмулятор запущен, но доступные подключения не найдены. Включите локальную отладку ADB в каждом нужном окне, дождитесь загрузки и обновите снимки.'))
+        except Exception as error:
+            if diagnostics is not None:
+                diagnostics.append((provider, preview_error_message(error)))
+    return windows

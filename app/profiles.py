@@ -43,7 +43,7 @@ class DeviceLeases:
                 ok, _ = manager.try_acquire()
                 if not ok:
                     manager.release()
-                    raise RuntimeError("Это окно MEmu уже используется другим окном программы. "
+                    raise RuntimeError("Это окно эмулятора уже используется другим окном программы. "
                                        "Сначала закройте его там или выберите другое окно.")
                 self.held.append(manager)
         except Exception:

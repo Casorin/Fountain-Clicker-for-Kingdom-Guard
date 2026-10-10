@@ -158,6 +158,7 @@ class WindowPicker(tk.Toplevel):
         self.refresh_button.grid(row=0, column=0, sticky='w')
         self.choose_button = ttk.Button(controls, text='Выбрать окна', style='Picker.Primary.TButton', command=self.choose, state='disabled')
         self.choose_button.grid(row=0, column=2, sticky='e')
+        self.choose_button.bind('<Button-1>', self.explain_disabled_choice)
         ttk.Button(controls, text='Отмена', command=self.destroy).grid(row=0, column=1, padx=10)
         self.bind('<Configure>', self.resize_text)
         self.grab_set()
@@ -192,8 +193,11 @@ class WindowPicker(tk.Toplevel):
         self.status.set('Получаем снимки из эмуляторов. Нажатий в игре нет…')
         def worker():
             try:
-                windows = discover_windows(self.adb_path)
+                warnings = []
+                windows = discover_windows(self.adb_path, diagnostics=warnings)
                 self.results.put(('list', windows))
+                for provider, message in warnings:
+                    self.results.put(('warning', provider, message))
                 for window in windows:
                     try:
                         self.results.put(('image', window.uuid, preview_window(self.adb_path, window)))
@@ -241,6 +245,12 @@ class WindowPicker(tk.Toplevel):
                 self.diagnostics.append((window.provider if window else 'Поиск окон', item[-1]))
                 self.status.set(item[-1])
                 self.render_preview()
+            elif item[0] == 'warning':
+                self.diagnostics.append((item[1], item[2]))
+                self.status.set(item[1] + ': ' + item[2])
+                if not self.windows:
+                    self.preview_errors[None] = item[2]
+                    self.render_preview()
             elif item[0] == 'done':
                 self.busy = False
                 self.refresh_button.configure(state='normal')
@@ -324,3 +334,14 @@ class WindowPicker(tk.Toplevel):
             windows = [w for w in self.windows.values() if w.uuid in self.checked]
             self.destroy()
             self.on_select(windows)
+
+    def explain_disabled_choice(self, _event=None):
+        if not self.choose_button.instate(['disabled']):
+            return
+        if self.busy:
+            self.status.set('Ещё получаем снимки. Дождитесь завершения загрузки, затем поставьте галочки у нужных окон.')
+        elif not self.checked:
+            self.status.set('Поставьте галочку слева от названия нужного окна. Если галочка не ставится, нажмите на название и прочитайте подсказку справа.')
+        else:
+            self.status.set('Не у всех отмеченных окон есть подходящий снимок. Обновите снимки или снимите галочки с недоступных окон.')
+        return 'break'

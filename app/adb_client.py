@@ -36,6 +36,7 @@ class AdbClient:
                 capture_output=True,
                 timeout=timeout,
                 check=False,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
             )
         except OSError as exc:
             raise AdbError(f"Не удалось запустить adb: {exc}") from exc

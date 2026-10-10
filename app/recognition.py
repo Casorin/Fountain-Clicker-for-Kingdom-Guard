@@ -136,6 +136,7 @@ def _run_windows_ocr(image_path: Path, timeout_seconds: float | None = None) -> 
             capture_output=True,
             check=False,
             timeout=timeout_seconds,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
     except subprocess.TimeoutExpired as exc:
         raise WindowsOcrTimeoutError(

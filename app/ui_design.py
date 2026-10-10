@@ -264,6 +264,12 @@ class FountainDesign:
         app.mode_var.trace_add('write', lambda *_: self.update_daily_reward_warning())
         self.update_daily_reward_warning()
 
+        self.action_guidance = tk.StringVar()
+        self.guidance_label = ttk.Label(hero, textvariable=self.action_guidance,
+                                        style='HeroHint.TLabel', wraplength=740, justify='left')
+        self.guidance_label.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(4, 0))
+        self.guidance_label.grid_remove()
+
         self.history_splitter = ttk.PanedWindow(frame, orient='vertical')
         self.history_splitter.grid(row=2, column=0, sticky='nsew', pady=(0,8))
         card = self.card(self.history_splitter)
@@ -875,6 +881,10 @@ class FountainDesign:
     def pulse(self):
         self.update_percent_preview()
         app = self.app
+        if hasattr(app, 'monitor') and hasattr(app.monitor, 'state'):
+            from app.user_guidance import observation_help
+            self.action_guidance.set(observation_help(app))
+            self.guidance_label.grid()
         self.update_empty_history()
         phase = app.phase_var.get()
         labels = {"WAITING": "Ждём подходящую сумму", "CANDIDATE": "Проверяем сумму",

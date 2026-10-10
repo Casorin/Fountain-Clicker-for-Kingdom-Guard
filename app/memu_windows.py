@@ -3,6 +3,7 @@ from dataclasses import dataclass, replace
 import json
 import re
 import subprocess
+import string
 from pathlib import Path
 
 from app.adb_client import AdbClient
@@ -30,22 +31,50 @@ def parse_window_info(name, uuid, info):
     return None
 
 
-def discover_windows(adb_path):
-    manage = Path(adb_path).parent.parent / 'MEmuHyperv' / 'MEmuManage.exe'
-    def read(*args):
+def memu_managers(adb_path, processes):
+    candidates = {Path(adb_path).parent.parent / 'MEmuHyperv' / 'MEmuManage.exe'}
+    for process in processes:
+        if process.get('Name', '').lower() in {'memu.exe', 'memuheadless.exe'} and process.get('ExecutablePath'):
+            folder = Path(process['ExecutablePath']).parent
+            candidates.update((folder.parent / 'MEmuHyperv' / 'MEmuManage.exe',
+                               folder / 'MEmuManage.exe'))
+    for drive in string.ascii_uppercase:
+        for folder in ('Microvirt', 'Program Files/Microvirt'):
+            candidates.add(Path(f'{drive}:/') / folder / 'MEmuHyperv/MEmuManage.exe')
+    return sorted({candidate.resolve() for candidate in candidates if candidate.is_file()})
+
+
+def discover_windows(adb_path, diagnostics=None):
+    from app.emulator_discovery import inventory, discover_extra_windows
+    from app.connection_diagnostics import preview_error_message
+    errors = diagnostics if diagnostics is not None else []
+    try:
+        data = inventory()
+    except Exception as error:
+        data = {'processes': [], 'ports': []}
+        errors.append(('Поиск окон', preview_error_message(error)))
+    def read(manage, *args):
         result = subprocess.run([str(manage), *args], capture_output=True, timeout=10,
                                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         if result.returncode:
             raise RuntimeError('Не удалось прочитать список окон MEmu.')
         return result.stdout.decode('utf-8', errors='replace')
     windows = []
-    listing = read('list', 'runningvms') if manage.exists() else ''
-    for name, uuid in re.findall(r'^"(.+)"\s+\{([0-9a-fA-F-]+)\}', listing, re.M):
-        window = parse_window_info(name, uuid, read('showvminfo', uuid, '--machinereadable'))
-        if window:
-            windows.append(window)
-    from app.emulator_discovery import discover_extra_windows
-    windows.extend(discover_extra_windows())
+    for manage in memu_managers(adb_path, data.get('processes', [])):
+        try:
+            listing = read(manage, 'list', 'runningvms')
+            for name, uuid in re.findall(r'^"(.+)"\s+\{([0-9a-fA-F-]+)\}', listing, re.M):
+                try:
+                    window = parse_window_info(name, uuid, read(manage, 'showvminfo', uuid, '--machinereadable'))
+                    if window and window.uuid not in {item.uuid for item in windows}:
+                        windows.append(window)
+                except Exception as error:
+                    errors.append(('MEmu', preview_error_message(error)))
+        except Exception as error:
+            errors.append(('MEmu', preview_error_message(error)))
+    windows.extend(discover_extra_windows(data, errors))
+    if not any(w.provider == 'MEmu' for w in windows) and any(p.get('Name', '').lower() in {'memu.exe', 'memuheadless.exe'} for p in data.get('processes', [])):
+        errors.append(('MEmu', 'MEmu запущен, но список его окон не получен. Дождитесь полной загрузки и обновите снимки. Если не помогло, отправьте технический отчёт.'))
     if len({w.serial for w in windows}) != len(windows):
         raise RuntimeError('Неоднозначные адреса эмуляторов. Выбор остановлен для безопасности.')
     return windows
@@ -56,7 +85,7 @@ def preview_window(adb_path, window):
     try:
         adb.connect()
         if window.serial not in adb.devices():
-            raise RuntimeError('Окно недоступно. Подождите окончания загрузки MEmu.')
+            raise RuntimeError('Окно недоступно. Проверьте локальную отладку ADB и дождитесь загрузки эмулятора.')
         return save_screen(adb, Path('unused.png'), backend='raw', save=False)
     finally:
         adb.close_shell()

@@ -42,6 +42,15 @@ class DesignTests(unittest.TestCase):
         button.invoke()
         self.app.open_program_window.assert_called_once()
 
+    def test_action_guidance_is_visible_without_expanding_details(self):
+        self.app.monitor = SimpleNamespace(state=MonitorState())
+        self.app._selection_error = 'not selected'
+        self.design.pulse()
+        self.root.update()
+        self.assertTrue(self.design.guidance_label.winfo_viewable())
+        self.assertIn('Выбрать окно эмулятора', self.design.action_guidance.get())
+        self.assertFalse(self.design.details_open)
+
     def test_daily_reward_warning_is_under_mode_switch_and_matches_theme(self):
         from tkinter import ttk
         warning = self.design.daily_reward_warning
@@ -76,9 +85,11 @@ class DesignTests(unittest.TestCase):
 
     def test_additional_window_launch_error_is_shown_in_main_window(self):
         with (patch('app.ui.subprocess.Popen',side_effect=OSError('launch failed')),
-              patch('app.ui.messagebox.showerror') as error):
+              patch('app.ui.messagebox.showinfo') as error):
             AppWindow.open_program_window(self.app)
-        error.assert_called_once_with('Не удалось открыть окно','launch failed',parent=self.root)
+        error.assert_called_once()
+        self.assertIn('архив полностью распакован', error.call_args.args[1])
+        self.assertEqual(error.call_args.kwargs['parent'], self.root)
 
     def test_history_headers_match_value_alignment_and_reset_label_is_explicit(self):
         for column in ('time','peak','interval'):
