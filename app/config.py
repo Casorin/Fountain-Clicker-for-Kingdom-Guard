@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import string
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,10 +19,20 @@ def _default_adb_path() -> Path:
         for relative in (
             Path("Microvirt") / "MEmu" / "adb.exe",
             Path("Program Files") / "Microvirt" / "MEmu" / "adb.exe",
+            Path("LDPlayer") / "LDPlayer9" / "adb.exe",
+            Path("LDPlayer") / "LDPlayer4.0" / "adb.exe",
+            Path("Program Files") / "BlueStacks_nxt" / "HD-Adb.exe",
         ):
             candidate = Path(f"{drive}:\\") / relative
             if candidate.exists():
                 return candidate
+    try:
+        from app.emulator_discovery import find_running_emulator_adb
+        candidate = find_running_emulator_adb()
+        if candidate:
+            return candidate
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
+        pass
     return Path("adb.exe")
 
 

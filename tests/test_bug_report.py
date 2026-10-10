@@ -12,6 +12,14 @@ from app.monitor import MonitorState
 
 
 class ReportTests(unittest.TestCase):
+    def test_report_includes_picker_errors_even_without_selected_window(self):
+        monitor = SimpleNamespace(state=MonitorState(), config=AppConfig())
+        app = SimpleNamespace(monitor=monitor, running=False,
+                              _window_preview_diagnostics=[('LDPlayer', 'Нет подключения к эмулятору.')])
+        report = build_report(app)
+        self.assertIn('Последняя проверка снимков', report)
+        self.assertIn('LDPlayer): Нет подключения к эмулятору.', report)
+
     def test_sizes_use_read_only_android_command_for_each_window(self):
         monitors=[]
         for i in range(4):

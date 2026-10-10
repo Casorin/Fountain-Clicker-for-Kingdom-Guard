@@ -5,6 +5,7 @@ from tkinter import ttk
 
 from PIL import Image, ImageDraw, ImageTk
 from app.memu_windows import discover_windows, preview_window
+from app.connection_diagnostics import preview_error_message
 
 
 def supported_preview(image):
@@ -42,7 +43,7 @@ class PinkScrollbar(tk.Canvas):
 
 
 class WindowPicker(tk.Toplevel):
-    def __init__(self, root, adb_path, selected_serial, on_select):
+    def __init__(self, root, adb_path, selected_serial, on_select, diagnostics=None):
         super().__init__(root)
         self.title('Выбор окон — Фонтан')
         width, height = min(1040, root.winfo_screenwidth()-80), min(740, root.winfo_screenheight()-100)
@@ -56,6 +57,8 @@ class WindowPicker(tk.Toplevel):
         self.checked = set()
         self.results = queue.Queue()
         self.windows, self.images = {}, {}
+        self.preview_errors = {}
+        self.diagnostics = diagnostics if diagnostics is not None else []
         self.busy = False
         self.status = tk.StringVar(value='Ищем открытые эмуляторы…')
         ttk.Label(self, text='Выберите окно эмулятора', font=('Bahnschrift', 22, 'bold')).grid(row=0, column=0, sticky='w', padx=24, pady=(18,6))
@@ -181,6 +184,8 @@ class WindowPicker(tk.Toplevel):
         if self.busy:
             return
         self.busy = True
+        self.diagnostics.clear()
+        self.preview_errors.clear()
         self.choose_button.configure(state='disabled')
         self.refresh_button.configure(state='disabled')
         self.status.set('Получаем снимки из эмуляторов. Нажатий в игре нет…')
@@ -192,9 +197,9 @@ class WindowPicker(tk.Toplevel):
                     try:
                         self.results.put(('image', window.uuid, preview_window(self.adb_path, window)))
                     except Exception as exc:
-                        self.results.put(('error', window.uuid, str(exc)))
+                        self.results.put(('error', window.uuid, preview_error_message(exc)))
             except Exception as exc:
-                self.results.put(('error', None, str(exc)))
+                self.results.put(('error', None, preview_error_message(exc)))
             finally:
                 self.results.put(('done',))
         threading.Thread(target=worker, name='kgpm-window-previews', daemon=True).start()
@@ -225,8 +230,14 @@ class WindowPicker(tk.Toplevel):
                     self.status.set('Нет доступных открытых эмуляторов. Проверьте локальное подключение ADB в их настройках.')
             elif item[0] == 'image':
                 self.images[item[1]] = item[2]
+                window = self.windows[item[1]]
+                size = item[2].size
+                self.diagnostics.append((window.provider, f'Снимок {size[0]} × {size[1]}; размер поддерживается: {supported_preview(item[2])}'))
                 self.show_preview()
             elif item[0] == 'error':
+                self.preview_errors[item[1]] = item[-1]
+                window = self.windows.get(item[1])
+                self.diagnostics.append((window.provider if window else 'Поиск окон', item[-1]))
                 self.status.set(item[-1])
             elif item[0] == 'done':
                 self.busy = False
@@ -238,6 +249,8 @@ class WindowPicker(tk.Toplevel):
         if selected and selected[0] in self.windows:
             self.preview_name.set(self.windows[selected[0]].name)
         if not selected or selected[0] not in self.images:
+            if selected and selected[0] in self.preview_errors:
+                self.status.set(self.preview_errors[selected[0]])
             self.render_preview()
             self.update_choice()
             return
@@ -275,7 +288,7 @@ class WindowPicker(tk.Toplevel):
                 return
             item = self.list.identify_row(event.y)
         if item not in self.images or not supported_preview(self.images[item]):
-            self.status.set('Сначала дождитесь снимка с поддерживаемым размером экрана.')
+            self.status.set(self.preview_errors.get(item, 'Сначала дождитесь снимка с поддерживаемым размером экрана.'))
             return
         if item in self.checked:
             self.checked.remove(item)

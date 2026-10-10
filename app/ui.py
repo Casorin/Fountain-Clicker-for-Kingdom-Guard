@@ -462,7 +462,9 @@ class AppWindow:
         self._window_picker_active = True
         from app.window_picker import WindowPicker
         serials = [s.window.serial for s in self._group.sessions.values()] if self._group else [self.config.adb_serial]
-        picker = WindowPicker(self.root, self._base_config.adb_path, serials, self._select_windows)
+        self._window_preview_diagnostics = []
+        picker = WindowPicker(self.root, self._base_config.adb_path, serials, self._select_windows,
+                              diagnostics=self._window_preview_diagnostics)
         def dismissed(event):
             if event.widget is picker:
                 self._window_picker_active = False

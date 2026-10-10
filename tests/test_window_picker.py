@@ -34,6 +34,18 @@ class PickerTests(unittest.TestCase):
         self.picker.choose()
         self.callback.assert_called_once_with([self.window])
 
+    def test_preview_error_is_retained_after_clicking_checkbox(self):
+        from types import SimpleNamespace
+        message = 'Нет подключения к эмулятору. Включите локальную отладку ADB.'
+        self.picker.results.put(('error', self.window.uuid, message))
+        self.picker.collect()
+        with patch.object(self.picker.list, 'identify_column', return_value='#0'), \
+             patch.object(self.picker.list, 'identify_row', return_value=self.window.uuid):
+            self.picker.toggle_checked(SimpleNamespace(keysym='', x=1, y=1))
+        self.assertEqual(self.picker.status.get(), message)
+        self.assertEqual(self.picker.diagnostics, [('MEmu', message)])
+        self.assertTrue(self.picker.choose_button.instate(['disabled']))
+
     def test_unsupported_size_cannot_start(self):
         self.picker.results.put(('image', self.window.uuid, Image.new('RGB', (200, 200))))
         self.picker.checked.add(self.window.uuid)

@@ -24,6 +24,20 @@ $t=@(Get-NetTCPConnection -State Listen | Select-Object LocalAddress,LocalPort,O
     return json.loads(read_command(['powershell.exe', '-NoProfile', '-Command', script]))
 
 
+def find_running_emulator_adb():
+    data = inventory()
+    for process in data.get('processes', []):
+        executable = process.get('ExecutablePath')
+        if not executable:
+            continue
+        folder = Path(executable).parent
+        for name in ('adb.exe', 'HD-Adb.exe'):
+            candidate = folder / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 def ld_windows(processes, ports, reader=read_command):
     from app.memu_windows import MemuWindow
     windows = []

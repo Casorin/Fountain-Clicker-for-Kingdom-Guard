@@ -62,6 +62,11 @@ def build_report(app, display_sizes=None):
         except PackageNotFoundError:
             lines.append(package + ': не установлено')
     monitors = report_monitors(app)
+    previews = getattr(app, '_window_preview_diagnostics', [])
+    if previews:
+        lines.append('Последняя проверка снимков при выборе окон:')
+        for index, (provider, result) in enumerate(previews[:100], 1):
+            lines.append(f'  Проверка {index} ({provider}): {result}')
     lines.append('Количество выбранных окон: ' + str(len(monitors)))
     for index, (provider, current, identifier) in enumerate(monitors, 1):
         if provider not in {'MEmu', 'LDPlayer', 'BlueStacks'}:
