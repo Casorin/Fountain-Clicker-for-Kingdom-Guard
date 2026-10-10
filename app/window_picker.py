@@ -69,6 +69,7 @@ class WindowPicker(tk.Toplevel):
         background = style.lookup('Card.TFrame', 'background') or '#ffffff'
         background = '#%02x%02x%02x' % tuple(value//256 for value in self.winfo_rgb(background))
         foreground = style.lookup('TLabel', 'foreground') or '#0b174f'
+        self.preview_foreground = foreground
         preview_background = '#eff9ff' if sum(self.winfo_rgb(background)) > 90000 else '#23334b'
         style.configure('Picker.Hint.TLabel',background=preview_background,
                         foreground=style.lookup('Muted.TLabel','foreground') or '#637cad',font=('Bahnschrift',10))
@@ -239,6 +240,7 @@ class WindowPicker(tk.Toplevel):
                 window = self.windows.get(item[1])
                 self.diagnostics.append((window.provider if window else 'Поиск окон', item[-1]))
                 self.status.set(item[-1])
+                self.render_preview()
             elif item[0] == 'done':
                 self.busy = False
                 self.refresh_button.configure(state='normal')
@@ -272,7 +274,19 @@ class WindowPicker(tk.Toplevel):
         selected = self.list.selection()
         width, height = self.preview.winfo_width(), self.preview.winfo_height()
         if not selected or selected[0] not in self.images:
-            self.preview.create_text(width//2, height//2, text='Предпросмотр пока недоступен')
+            error = self.preview_errors.get(selected[0] if selected else None) or self.preview_errors.get(None)
+            if error:
+                self.preview.create_text(width//2, max(30, height//2-65),
+                                         text='Не удалось получить снимок',
+                                         fill=self.preview_foreground, font=('Bahnschrift', 16, 'bold'),
+                                         width=max(100, width-48), justify='center')
+                self.preview.create_text(width//2, height//2,
+                                         text=error, fill=self.preview_foreground,
+                                         font=('Bahnschrift', 12), width=max(100, width-48),
+                                         justify='center', anchor='n')
+            else:
+                self.preview.create_text(width//2, height//2, text='Предпросмотр пока недоступен',
+                                         fill=self.preview_foreground)
             return
         thumbnail = self.images[selected[0]].copy()
         thumbnail.thumbnail((max(1, width-10), max(1, height-10)))

@@ -44,6 +44,9 @@ class PickerTests(unittest.TestCase):
             self.picker.toggle_checked(SimpleNamespace(keysym='', x=1, y=1))
         self.assertEqual(self.picker.status.get(), message)
         self.assertEqual(self.picker.diagnostics, [('MEmu', message)])
+        preview_text = [self.picker.preview.itemcget(item, 'text') for item in self.picker.preview.find_all()]
+        self.assertIn('Не удалось получить снимок', preview_text)
+        self.assertIn(message, preview_text)
         self.assertTrue(self.picker.choose_button.instate(['disabled']))
 
     def test_unsupported_size_cannot_start(self):
