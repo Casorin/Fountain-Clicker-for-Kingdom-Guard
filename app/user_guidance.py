@@ -2,6 +2,8 @@
 
 
 def action_block_reason(app):
+    if getattr(app, '_resetting_data', False):
+        return 'Выполняем полный сброс. Клики выключены; дождитесь перезапуска программы.'
     if getattr(app, '_window_close_started', False):
         return 'Программа закрывается. Дождитесь закрытия и откройте её снова.'
     if getattr(app, '_switching_window', False):

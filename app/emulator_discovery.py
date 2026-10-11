@@ -26,6 +26,7 @@ $t=@(Get-NetTCPConnection -State Listen | Select-Object LocalAddress,LocalPort,O
 
 def find_running_emulator_adb():
     data = inventory()
+    candidates = []
     for process in data.get('processes', []):
         executable = process.get('ExecutablePath')
         if not executable:
@@ -34,8 +35,10 @@ def find_running_emulator_adb():
         for name in ('adb.exe', 'HD-Adb.exe'):
             candidate = folder / name
             if candidate.is_file():
-                return candidate
-    return None
+                candidates.append(candidate)
+    # Vendor HD-Adb is a fallback, not the client for other running emulators.
+    return next((path for path in candidates if path.name.lower() == 'adb.exe'),
+                candidates[0] if candidates else None)
 
 
 def ld_windows(processes, ports, reader=read_command):

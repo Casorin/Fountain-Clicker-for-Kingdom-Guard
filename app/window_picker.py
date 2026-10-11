@@ -1,6 +1,7 @@
 import queue
 import threading
 import tkinter as tk
+import uuid
 from tkinter import ttk
 
 from PIL import Image, ImageDraw, ImageTk
@@ -10,6 +11,30 @@ from app.connection_diagnostics import preview_error_message
 
 def supported_preview(image):
     return (480 <= image.height <= 4096 and .5 <= image.width/image.height <= 2.5)
+
+
+def picker_style_images(root, outer_color, preview_background):
+    # Ttk elements live until the Tk interpreter closes, not until a picker closes.
+    outer_color = tuple(value//256 for value in root.winfo_rgb(outer_color))
+    cache = getattr(root, '_fountain_picker_styles', None)
+    if cache is None:
+        cache = root._fountain_picker_styles = {}
+    key = (outer_color, preview_background)
+    if key not in cache:
+        style = ttk.Style(root)
+        token = uuid.uuid4().hex
+        images = []
+        for role, size, radius, fill, border in (
+                ('Panel',40,12,preview_background,13), ('Button',32,8,'#ffacd0',9)):
+            image = Image.new('RGB',(size,size),outer_color)
+            ImageDraw.Draw(image).rounded_rectangle((0,0,size-1,size-1),radius=radius,
+                                                    fill=fill,outline='#cce8fb' if role == 'Panel' else fill)
+            photo = ImageTk.PhotoImage(image,master=root)
+            element = f'Picker{role}{token}'
+            style.element_create(element,'image',photo,border=border,sticky='nsew')
+            images.append((element,photo))
+        cache[key] = images
+    return cache[key]
 
 
 class PinkScrollbar(tk.Canvas):
@@ -56,6 +81,7 @@ class WindowPicker(tk.Toplevel):
         self.selected_serials = {selected_serial} if isinstance(selected_serial, str) else set(selected_serial)
         self.checked = set()
         self.results = queue.Queue()
+        self._cancelled = threading.Event()
         self.windows, self.images = {}, {}
         self.preview_errors = {}
         self.diagnostics = diagnostics if diagnostics is not None else []
@@ -74,21 +100,19 @@ class WindowPicker(tk.Toplevel):
         style.configure('Picker.Hint.TLabel',background=preview_background,
                         foreground=style.lookup('Muted.TLabel','foreground') or '#637cad',font=('Bahnschrift',10))
         style.configure('Picker.Title.TLabel',background=preview_background,foreground=foreground,font=('Bahnschrift',15,'bold'))
-        panel = Image.new('RGB',(40,40),tuple(value//256 for value in self.winfo_rgb(self.cget('bg'))))
-        ImageDraw.Draw(panel).rounded_rectangle((0,0,39,39),radius=12,fill=preview_background,outline='#cce8fb')
-        self.panel_image = ImageTk.PhotoImage(panel,master=self)
-        element = f'PickerPanel{id(self)}'
-        style.element_create(element,'image',self.panel_image,border=13,sticky='nsew')
+        (element,self.panel_image),(button_element,self.choose_image) = picker_style_images(
+            root,self.cget('bg'),preview_background)
         style.layout('Picker.Preview.TFrame',[(element,{'sticky':'nsew'})])
         style.configure('Picker.Inner.TFrame',background=preview_background)
-        button_image = Image.new('RGB',(32,32),tuple(value//256 for value in self.winfo_rgb(self.cget('bg'))))
-        ImageDraw.Draw(button_image).rounded_rectangle((0,0,31,31),radius=8,fill='#ffacd0')
-        self.choose_image = ImageTk.PhotoImage(button_image,master=self)
-        button_element = f'PickerButton{id(self)}'
-        style.element_create(button_element,'image',self.choose_image,border=9,sticky='nsew')
         style.layout('Picker.Primary.TButton',[(button_element,{'sticky':'nsew','children':[
             ('Button.padding',{'sticky':'nsew','children':[('Button.label',{'sticky':'nsew'})]})]})])
         style.configure('Picker.Primary.TButton',font=('Bahnschrift',12,'bold'),padding=(18,6),foreground=foreground)
+        style.layout('Picker.Loading.TButton', style.layout('Picker.Primary.TButton'))
+        style.configure('Picker.Loading.TButton', font=('Trebuchet MS',10,'bold'),
+                        padding=(12,0), foreground='#141b45')
+        style.map('Picker.Loading.TButton', foreground=[('disabled','#141b45')])
+        style.configure('Picker.Horizontal.TProgressbar', background='#e875a9',
+                        troughcolor=preview_background, borderwidth=0)
         style.configure('Picker.Treeview', background=background, fieldbackground=background,
                         foreground=foreground, rowheight=48, borderwidth=0,
                         font=('Bahnschrift', 12, 'bold'))
@@ -154,8 +178,12 @@ class WindowPicker(tk.Toplevel):
         controls = ttk.Frame(self)
         controls.grid(row=4, column=0, sticky='ew', padx=24, pady=(0,16))
         controls.columnconfigure(0, weight=1)
-        self.refresh_button = ttk.Button(controls, text='↻  Обновить снимки', command=self.refresh)
-        self.refresh_button.grid(row=0, column=0, sticky='w')
+        refresh_controls = ttk.Frame(controls)
+        refresh_controls.grid(row=0, column=0, sticky='w')
+        self.refresh_button = ttk.Button(refresh_controls, text='↻  Обновить снимки', command=self.refresh, width=21)
+        self.refresh_button.pack(side='left')
+        self.refresh_progress = ttk.Progressbar(refresh_controls, length=90, mode='indeterminate',
+                                               style='Picker.Horizontal.TProgressbar')
         self.choose_button = ttk.Button(controls, text='Выбрать окна', style='Picker.Primary.TButton', command=self.choose, state='disabled')
         self.choose_button.grid(row=0, column=2, sticky='e')
         self.choose_button.bind('<Button-1>', self.explain_disabled_choice)
@@ -166,10 +194,18 @@ class WindowPicker(tk.Toplevel):
         self._collect_job = self.after(50, self.collect)
 
     def destroy(self):
+        cancelled = getattr(self, '_cancelled', None)
+        if cancelled is not None:
+            cancelled.set()
+        progress = getattr(self, 'refresh_progress', None)
+        if progress is not None and progress.winfo_exists():
+            progress.stop()
         job = getattr(self, '_collect_job', None)
         if job is not None:
             self.after_cancel(job)
             self._collect_job = None
+        if self.grab_current() is self:
+            self.grab_release()
         super().destroy()
 
     def position_handle(self):
@@ -188,17 +224,27 @@ class WindowPicker(tk.Toplevel):
         self.busy = True
         self.diagnostics.clear()
         self.preview_errors.clear()
+        self.images.clear()
         self.choose_button.configure(state='disabled')
-        self.refresh_button.configure(state='disabled')
+        self.refresh_button.configure(state='disabled', text='Обновляем снимки…',
+                                      style='Picker.Loading.TButton', cursor='watch')
+        self.refresh_progress.configure(mode='indeterminate', value=0)
+        self.refresh_progress.pack(side='left', padx=(10,0))
+        self.refresh_progress.start(30)
         self.status.set('Получаем снимки из эмуляторов. Нажатий в игре нет…')
+        self.render_preview()
         def worker():
             try:
                 warnings = []
                 windows = discover_windows(self.adb_path, diagnostics=warnings)
+                if self._cancelled.is_set():
+                    return
                 self.results.put(('list', windows))
                 for provider, message in warnings:
                     self.results.put(('warning', provider, message))
                 for window in windows:
+                    if self._cancelled.is_set():
+                        return
                     try:
                         self.results.put(('image', window.uuid, preview_window(self.adb_path, window)))
                     except Exception as exc:
@@ -221,6 +267,8 @@ class WindowPicker(tk.Toplevel):
             if item[0] == 'list':
                 self.list.delete(*self.list.get_children())
                 self.windows = {w.uuid: w for w in item[1]}
+                self.refresh_progress.stop()
+                self.refresh_progress.configure(mode='determinate', maximum=max(1,len(self.windows)), value=0)
                 self.images.clear()
                 self.checked.clear()
                 for window in item[1]:
@@ -253,7 +301,13 @@ class WindowPicker(tk.Toplevel):
                     self.render_preview()
             elif item[0] == 'done':
                 self.busy = False
-                self.refresh_button.configure(state='normal')
+                self.refresh_progress.stop()
+                self.refresh_progress.pack_forget()
+                self.refresh_button.configure(state='normal', text='↻  Обновить снимки', style='TButton', cursor='')
+                self.show_preview()
+            if item[0] in {'image','error'} and item[1] in self.windows:
+                completed = len(set(self.images) | (set(self.preview_errors) & set(self.windows)))
+                self.refresh_progress.configure(value=completed)
         self._collect_job = self.after(50, self.collect)
 
     def show_preview(self, _event=None):
@@ -295,7 +349,8 @@ class WindowPicker(tk.Toplevel):
                                          font=('Bahnschrift', 12), width=max(100, width-48),
                                          justify='center', anchor='n')
             else:
-                self.preview.create_text(width//2, height//2, text='Предпросмотр пока недоступен',
+                self.preview.create_text(width//2, height//2,
+                                         text='Получаем снимок…' if self.busy else 'Предпросмотр пока недоступен',
                                          fill=self.preview_foreground)
             return
         thumbnail = self.images[selected[0]].copy()

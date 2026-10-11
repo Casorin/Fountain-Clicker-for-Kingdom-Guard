@@ -565,6 +565,8 @@ class PrizeMonitor:
             interval_seconds=interval_seconds,
         )
         self.reset_history.insert(0, event)
+        from app.data_storage import HISTORY_LIMIT
+        del self.reset_history[HISTORY_LIMIT:]
         self.state.last_recorded_reset_episode_token = self.state.reset_episode_token
         save_reset_history(self.config.reset_history_path, self.reset_history)
 

@@ -222,6 +222,8 @@ class AppWindow:
         self.config = replace(self.config,stream_transport_enabled=True,
                               continuous_max_taps=0)
         self._base_config = self.config
+        from app.data_storage import DATA_ROOT
+        self._data_root = DATA_ROOT
         from app.profiles import DeviceLeases
         self._device_leases = DeviceLeases(AppConfig().runtime_dir / 'device_owners')
         self._selection_path = self.config.runtime_dir / 'window_selection.json'
@@ -330,6 +332,7 @@ class AppWindow:
         self._refresh_static_panels()
         self._start_ocr_warmup()
         self.root.after(100, self._collect_group)
+        self.root.after_idle(self.design.show_first_launch_help)
 
     def _build(self) -> None:
         from app.ui_design import FountainDesign
@@ -473,8 +476,20 @@ class AppWindow:
         from app.window_picker import WindowPicker
         serials = [s.window.serial for s in self._group.sessions.values()] if self._group else [self.config.adb_serial]
         self._window_preview_diagnostics = []
-        picker = WindowPicker(self.root, self._base_config.adb_path, serials, self._select_windows,
-                              diagnostics=self._window_preview_diagnostics)
+        previous_children = set(self.root.winfo_children())
+        try:
+            picker = WindowPicker(self.root, self._base_config.adb_path, serials, self._select_windows,
+                                  diagnostics=self._window_preview_diagnostics)
+        except Exception as exc:
+            self._window_picker_active = False
+            for child in set(self.root.winfo_children()) - previous_children:
+                if isinstance(child, tk.Toplevel):
+                    tk.Toplevel.destroy(child)
+            self._append_log('Не удалось открыть выбор эмулятора: ' + str(exc))
+            AppWindow._show_action_help(self, 'Не удалось открыть выбор эмулятора',
+                'Окно выбора не удалось открыть. Попробуйте снова. Если ошибка повторится, '
+                'перезапустите кликер и отправьте отчёт через «Сообщить об ошибке». Эмулятор закрывать не нужно.')
+            return
         def dismissed(event):
             if event.widget is picker:
                 self._window_picker_active = False
@@ -489,6 +504,38 @@ class AppWindow:
         except OSError as exc:
             self._append_log(str(exc))
             AppWindow._show_action_help(self, 'Не удалось открыть окно', 'Проверьте, что архив полностью распакован и файлы программы не перемещены по отдельности. Если ошибка повторяется, отправьте технический отчёт.')
+
+    def reset_all_data(self) -> None:
+        if getattr(self,'_resetting_data',False):
+            return
+        if self._switching_window or self._window_picker_active:
+            AppWindow._show_action_help(self,'Сброс данных',
+                'Сначала завершите выбор окна эмулятора, затем повторите сброс.')
+            return
+        from app.data_storage import other_programs_running
+        if other_programs_running():
+            AppWindow._show_action_help(self,'Закройте другие окна кликера',
+                'Для полного сброса закройте остальные окна программы «Фонтан». Эмуляторы закрывать не нужно.')
+            return
+        if not messagebox.askyesno('Полностью сбросить программу?',
+                'Будут удалены вся история, настройки, выбранные окна, оформление и технические данные '
+                'этой копии программы, включая данные отдельных фондов. Отменить удаление нельзя.\n\n'
+                'Клики остановятся. Программа перезапустится как при первом запуске. '
+                'Игра и эмуляторы не изменятся.\n\nСбросить всё?',parent=self.root,icon='warning'):
+            return
+        self._resetting_data = True
+        self._warmup_start_requested = False
+        self.emergency_stop()
+        try:
+            from app.data_reset import launch_reset_helper
+            launch_reset_helper()
+        except OSError:
+            self._resetting_data = False
+            AppWindow._show_action_help(self,'Сброс не начался',
+                'Не удалось запустить сброс. Данные не удалены, клики остановлены. Перезапустите программу и попробуйте снова.')
+            return
+        self.status_var.set('Закрываем программу для полного сброса данных…')
+        self.close_callback()
 
     def _select_windows(self, windows) -> None:
         current = {(w.uuid, w.serial) for w in self._selected_windows}
@@ -1249,6 +1296,16 @@ class AppWindow:
 
 
 def main() -> None:
+    from app.data_storage import ResetGuard
+    try:
+        with ResetGuard(timeout_seconds=65):
+            pass
+    except (OSError,RuntimeError) as error:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror('Подождите завершения сброса',str(error),parent=root)
+        root.destroy()
+        return
     from app.branding import set_taskbar_identity
     set_taskbar_identity()
     from app.profiles import profile_config, profile_mutex
@@ -1280,6 +1337,8 @@ def main() -> None:
     style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
 
     app = AppWindow(root, config, args.profile)
+    from app.data_storage import DataMaintenance
+    maintenance = DataMaintenance()
     from app.hotkeys import SharedHotkeys
     hotkeys = SharedHotkeys(root, app.toggle, app.emergency_stop, AppConfig().runtime_dir / 'hotkey_commands')
     app.global_f8 = hotkeys.keys[0].registered
@@ -1308,6 +1367,7 @@ def main() -> None:
                 root.destroy()
                 return
             app._window_close_started=True
+            maintenance.close()
             hotkeys.close()
             app._cleanup_thread=threading.Thread(target=app._close_monitors,name='kgpm-cleanup',daemon=True)
             app._cleanup_thread.start()

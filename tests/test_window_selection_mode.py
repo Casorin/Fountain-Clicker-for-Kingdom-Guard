@@ -1,4 +1,5 @@
 import unittest
+import tkinter as tk
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -12,6 +13,7 @@ class WindowSelectionModeTests(unittest.TestCase):
             _warmup_start_requested=True, pause=Mock(), root=Mock(),
             _base_config=SimpleNamespace(adb_path='adb.exe'), _group=None,
             config=SimpleNamespace(adb_serial='device-1'), _select_windows=Mock())
+        app.root.winfo_children.return_value = []
         with patch('app.window_picker.WindowPicker') as picker_class:
             AppWindow.choose_window(app)
             picker = picker_class.return_value
@@ -20,6 +22,31 @@ class WindowSelectionModeTests(unittest.TestCase):
         app.pause.assert_not_called()
         self.assertTrue(app._warmup_start_requested)
         self.assertFalse(app._window_picker_active)
+
+    def test_failed_picker_construction_removes_partial_window_and_allows_retry(self):
+        root = tk.Tk()
+        root.withdraw()
+        app = SimpleNamespace(_switching_window=False, _window_picker_active=False,
+            root=root, _base_config=SimpleNamespace(adb_path='adb.exe'), _group=None,
+            config=SimpleNamespace(adb_serial='one'), _select_windows=Mock(),
+            _append_log=Mock(), status_var=tk.StringVar(root))
+        def fail(*args, **kwargs):
+            partial = tk.Toplevel(root)
+            partial.grab_set()
+            raise tk.TclError('Duplicate element')
+        try:
+            with patch('app.window_picker.WindowPicker', side_effect=fail), \
+                 patch('app.ui.messagebox.showinfo') as notice:
+                AppWindow.choose_window(app)
+            self.assertFalse(app._window_picker_active)
+            self.assertFalse(root.winfo_children())
+            self.assertIsNone(root.grab_current())
+            notice.assert_called_once()
+            with patch('app.window_picker.WindowPicker') as picker:
+                AppWindow.choose_window(app)
+            picker.assert_called_once()
+        finally:
+            root.destroy()
 
     def test_confirming_same_windows_in_different_order_is_noop(self):
         windows = [SimpleNamespace(uuid='a', serial='one'),

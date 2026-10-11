@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from app.data_storage import HISTORY_LIMIT
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -176,6 +177,8 @@ def load_reset_history(path: Path) -> list[ResetEvent]:
         return []
     items: list[ResetEvent] = []
     for row in data:
+        if len(items) >= HISTORY_LIMIT:
+            break
         if not isinstance(row, dict):
             continue
         timestamp_reset = row.get("timestamp_reset")
@@ -218,10 +221,15 @@ def load_reset_history(path: Path) -> list[ResetEvent]:
                 interval_seconds=row.get("interval_seconds"),
             )
         )
+    if len(data) > HISTORY_LIMIT:
+        try:
+            save_reset_history(path,items)
+        except OSError:
+            pass
     return items
 
 
 def save_reset_history(path: Path, events: list[ResetEvent]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = [asdict(event) for event in events]
+    payload = [asdict(event) for event in events[:HISTORY_LIMIT]]
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

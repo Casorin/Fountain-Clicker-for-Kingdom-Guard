@@ -56,6 +56,12 @@ def build_report(app, display_sizes=None):
     for name in ('ui.py', 'monitor.py', 'production_ocr.py', 'bug_report.py'):
         digest.update((Path(__file__).parent/name).read_bytes())
     lines.append('Идентификатор сборки: ' + digest.hexdigest()[:16])
+    from app.adb_runtime import bundled_adb_path
+    adb_path = Path(config.adb_path)
+    bundled = bundled_adb_path()
+    client = ('встроенный стандартный ADB' if bundled and adb_path.resolve() == bundled.resolve()
+              else 'ADB BlueStacks' if adb_path.name.lower() == 'hd-adb.exe' else 'внешний ADB')
+    lines.append('Подключение к эмуляторам: ' + client)
     for package in ('rapidocr', 'paddleocr', 'onnxruntime', 'av'):
         try:
             lines.append(package + ': ' + version(package))

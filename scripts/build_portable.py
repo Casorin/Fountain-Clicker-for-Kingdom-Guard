@@ -21,6 +21,8 @@ def ignored(folder, names):
 def build(destination, model_cache):
     if sys.platform != 'win32' or sys.maxsize <= 2**32:
         raise RuntimeError('Build with 64-bit Windows Python')
+    from app.adb_runtime import verify_adb_files
+    verify_adb_files()
     bundle = destination / f'Fountain-{APP_VERSION}-Windows'
     if bundle.exists():
         raise FileExistsError(f'Use a new output folder: {bundle}')

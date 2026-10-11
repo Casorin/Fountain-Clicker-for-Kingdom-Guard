@@ -8,6 +8,12 @@ see .python/LICENSE.txt), Tcl/Tk from that Python distribution, dependency
 license files in .python/Lib/site-packages, and the PaddleX recognition model.
 Local runtime data, account selections, and user diagnostics are not distributed.
 
+The Windows archive includes the unmodified open-source Android Debug Bridge
+37.0.1 and its Windows support DLLs from Google's SDK Platform-Tools archive.
+See assets/adb/NOTICE.txt for the upstream notices and licenses, and
+assets/adb/source.json for the download source and pinned SHA256 hashes.
+No fastboot, disk tools, or vendor-modified ADB clients are distributed.
+
 | Component | Version | License |
 |---|---:|---|
 | RapidOCR | 3.9.1 | Apache-2.0 |
@@ -20,6 +26,7 @@ Local runtime data, account selections, and user diagnostics are not distributed
 | OpenCV contrib Python | 4.10.0.84 (transitive) | Apache-2.0 and bundled notices |
 | PyAV | 19.0.1 | BSD-3-Clause and bundled FFmpeg notices |
 | scrcpy server | 4.1 | Apache-2.0 |
+| Android Debug Bridge | 37.0.1 | Apache-2.0 and bundled third-party notices |
 
 scrcpy server source: https://github.com/Genymobile/scrcpy/tree/v4.1
 Release SHA256: deacb991ed2509715160ffdc7907e47b4160eb30d1566217e9047fd5b8850cae

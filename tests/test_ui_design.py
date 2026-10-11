@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from app.ui_design import FountainDesign, load_theme
 from app.ui import AppWindow
 from app.monitor import MonitorState
+from app.persistence import UserRangeConfig
 
 
 class DesignTests(unittest.TestCase):
@@ -41,6 +42,86 @@ class DesignTests(unittest.TestCase):
         self.assertLessEqual(button.winfo_x() + button.winfo_width(), button.master.winfo_width())
         button.invoke()
         self.app.open_program_window.assert_called_once()
+
+    def test_first_launch_opens_first_topic_only_once(self):
+        self.design.show_first_launch_help()
+        help_window = self.design.help_window
+        self.assertEqual(help_window.topics.curselection(),(0,))
+        self.assertIn('Первый запуск',help_window.text.get('1.0','2.0'))
+        self.assertFalse(self.app.mode_var.get())
+        help_window.destroy()
+        with patch.object(self.design,'open_help') as open_help:
+            self.design.show_first_launch_help()
+        open_help.assert_not_called()
+
+    def test_current_rule_is_not_changed_by_unsaved_inputs(self):
+        self.app.monitor = SimpleNamespace(target_range_label=Mock(return_value='от 90 000'))
+        self.design.update_active_rule_summary()
+        self.assertEqual(self.design.active_rule_summary.get(),'Действует: от 90 000 · К/С 5')
+        self.app.test_range_min_var.set('40000')
+        self.assertEqual(self.design.active_rule_summary.get(),'Действует: от 90 000 · К/С 5')
+        self.assertIn('ещё не сохранены',self.design.settings_note.get())
+        self.app.monitor.target_range_label.return_value = 'от 40 000'
+        self.design.mark_saved()
+        self.assertEqual(self.design.active_rule_summary.get(),'Действует: от 40 000 · К/С 5')
+
+    def test_current_rule_shows_saved_limits_and_speed(self):
+        active = UserRangeConfig(60000,500000,minimum_gems=40000,
+            start_method='percent',start_percent=80,percent_minimum_prize=65000,
+            clicks_per_second=4)
+        self.app.monitor = SimpleNamespace(user_range=active,
+            target_range_label=lambda: '80% · ждём новое обнуление')
+        self.design.update_active_rule_summary()
+        expected = ('Действует: 80% · ждём новое обнуление · ≥ 65 000'
+                    ' · оставить 40 000 · К/С 4')
+        self.assertEqual(self.design.active_rule_summary.get(),expected)
+        self.app.percent_floor_var.set('90000')
+        self.app.gem_floor_var.set('50000')
+        self.app.click_speed_var.set('8')
+        self.assertEqual(self.design.active_rule_summary.get(),expected)
+
+    def test_current_rule_hides_disabled_limits_and_inactive_percent_floor(self):
+        self.app.monitor = SimpleNamespace(
+            user_range=UserRangeConfig(60000,500000,percent_minimum_prize=65000),
+            target_range_label=lambda: '60 000–500 000')
+        self.design.update_active_rule_summary()
+        self.assertEqual(self.design.active_rule_summary.get(),
+                         'Действует: 60 000–500 000 · К/С 5')
+
+    def test_summary_limits_change_only_after_saved_snapshot(self):
+        self.app.start_method_var.set('percent')
+        self.app.percent_floor_enabled_var.set(True)
+        self.app.percent_floor_var.set('65000')
+        self.app.gem_limit_enabled_var.set(True)
+        self.app.click_speed_var.set('4')
+        self.assertNotIn('≥',self.design.active_rule_summary.get())
+        self.assertNotIn('оставить',self.design.active_rule_summary.get())
+        self.assertIn('К/С 5',self.design.active_rule_summary.get())
+        self.design.mark_saved()
+        self.assertIn('≥ 65 000 · оставить 40 000 · К/С 4',
+                      self.design.active_rule_summary.get())
+
+    def test_reset_button_is_inside_collapsible_work_details(self):
+        self.assertFalse(self.design.reset_data_button.winfo_viewable())
+        self.design.toggle_details()
+        self.root.update()
+        self.assertTrue(self.design.reset_data_button.winfo_viewable())
+
+    def test_window_selection_is_green_only_without_confirmed_windows(self):
+        button = self.design.select_window_button
+        self.assertEqual(button.cget('style'), 'SelectWindow.Top.TButton')
+        button.invoke()
+        self.app.choose_window.assert_called_once()
+        self.design.pulse()
+        self.assertEqual(button.cget('style'), 'SelectWindow.Top.TButton')
+        self.app._selected_windows = [SimpleNamespace(uuid='selected')]
+        self.design.pulse()
+        self.assertEqual(button.cget('style'), 'Top.TButton')
+        self.design.toggle_theme()
+        self.assertEqual(button.cget('style'), 'Top.TButton')
+        self.app._selected_windows = []
+        self.design.pulse()
+        self.assertEqual(button.cget('style'), 'SelectWindow.Top.TButton')
 
     def test_action_guidance_is_visible_without_expanding_details(self):
         self.app.monitor = SimpleNamespace(state=MonitorState())
@@ -359,7 +440,7 @@ class DesignTests(unittest.TestCase):
         self.assertFalse(self.design.slider.winfo_ismapped())
         self.assertFalse(self.design.range_line.winfo_ismapped())
         self.assertFalse(self.design.percent_entry.instate(['disabled']))
-        self.assertIn('Сохранить', self.design.settings_note.get())
+        self.assertIn('ещё не сохранены', self.design.settings_note.get())
         self.app.start_method_var.set('range')
         self.root.update()
         self.assertTrue(self.design.range_entries.winfo_ismapped())
@@ -375,7 +456,7 @@ class DesignTests(unittest.TestCase):
         self.app.percent_floor_enabled_var.set(True)
         self.root.update()
         self.assertEqual(self.design.percent_threshold.get(),'90 000')
-        self.assertIn('ещё не применены',self.design.settings_note.get())
+        self.assertIn('ещё не сохранены',self.design.settings_note.get())
         self.assertFalse(self.design.percent_floor_entry.instate(['disabled']))
         self.app.percent_floor_enabled_var.set(False)
         self.root.update()
@@ -452,8 +533,8 @@ class DesignTests(unittest.TestCase):
     def test_wallet_changes_show_unsaved_hint_until_success(self):
         self.app.gem_limit_enabled_var.set(True)
         self.app.gem_floor_var.set('50000')
-        self.assertIn('ещё не применены',self.design.settings_note.get())
+        self.assertIn('ещё не сохранены',self.design.settings_note.get())
         self.app.apply_range()
-        self.assertIn('ещё не применены',self.design.settings_note.get())
+        self.assertIn('ещё не сохранены',self.design.settings_note.get())
         self.design.mark_saved()
         self.assertIn('Настройки сохранены',self.design.settings_note.get())

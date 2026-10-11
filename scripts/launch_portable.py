@@ -13,6 +13,10 @@ def main():
     os.environ['PYTHONNOUSERSITE'] = '1'
     os.environ['PADDLE_PDX_CACHE_HOME'] = str(root / '.models')
     if '--self-test' in sys.argv:
+        from app.adb_runtime import verify_adb_files, bundled_adb_path
+        from app.adb_client import AdbClient
+        adb_version = verify_adb_files()
+        AdbClient(bundled_adb_path(), 'unused')._run('version', timeout=5)
         import tkinter as tk
         from PIL import Image
         from app.production_ocr import ProductionOcrEngines
@@ -21,14 +25,33 @@ def main():
         window.withdraw()
         window.destroy()
         report = ProductionOcrEngines().warm_up(Image.new('RGB', (183, 42), '#505050'))
-        report.update(version=APP_VERSION, python=sys.executable, real_taps=0)
+        report.update(version=APP_VERSION, python=sys.executable, real_taps=0, adb=adb_version)
         print(json.dumps(report, ensure_ascii=False))
+        return
+    from app.data_storage import ResetGuard
+    try:
+        with ResetGuard(timeout_seconds=65):
+            pass
+    except (OSError, RuntimeError) as error:
+        import tkinter.messagebox as messagebox
+        messagebox.showerror('Подождите завершения сброса', str(error))
         return
     runtime = root / 'runtime'
     runtime.mkdir(exist_ok=True)
     output = (runtime / 'launcher.log').open('a', encoding='utf-8', buffering=1)
     sys.stdout = sys.stderr = output
     try:
+        from app.adb_runtime import verify_adb_files
+        try:
+            verify_adb_files()
+        except (OSError, ValueError, KeyError):
+            traceback.print_exc()
+            import tkinter.messagebox as messagebox
+            messagebox.showerror('Файлы программы неполные или повреждены',
+                'Не удалось проверить встроенное подключение к эмуляторам.\n'
+                'Распакуйте весь архив заново в отдельную папку. Если не помогло, '
+                'скачайте архив повторно. Не отключайте антивирус; при повторной ошибке обратитесь к автору.')
+            return
         from app.ui import main as launch
         launch()
     except Exception:

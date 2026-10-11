@@ -12,20 +12,13 @@ def _default_adb_path() -> Path:
     configured = os.environ.get("KGPM_ADB_PATH", "").strip()
     if configured:
         return Path(configured)
+    from app.adb_runtime import bundled_adb_path
+    bundled = bundled_adb_path()
+    if bundled:
+        return bundled
     on_path = shutil.which("adb")
     if on_path:
         return Path(on_path)
-    for drive in string.ascii_uppercase:
-        for relative in (
-            Path("Microvirt") / "MEmu" / "adb.exe",
-            Path("Program Files") / "Microvirt" / "MEmu" / "adb.exe",
-            Path("LDPlayer") / "LDPlayer9" / "adb.exe",
-            Path("LDPlayer") / "LDPlayer4.0" / "adb.exe",
-            Path("Program Files") / "BlueStacks_nxt" / "HD-Adb.exe",
-        ):
-            candidate = Path(f"{drive}:\\") / relative
-            if candidate.exists():
-                return candidate
     try:
         from app.emulator_discovery import find_running_emulator_adb
         candidate = find_running_emulator_adb()
@@ -33,6 +26,18 @@ def _default_adb_path() -> Path:
             return candidate
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
         pass
+    for relative in (
+            Path("Microvirt") / "MEmu" / "adb.exe",
+            Path("Program Files") / "Microvirt" / "MEmu" / "adb.exe",
+            Path("LDPlayer") / "LDPlayer9" / "adb.exe",
+            Path("LDPlayer") / "LDPlayer14" / "adb.exe",
+            Path("LDPlayer") / "LDPlayer4.0" / "adb.exe",
+            Path("Program Files") / "BlueStacks_nxt" / "HD-Adb.exe",
+        ):
+        for drive in string.ascii_uppercase:
+            candidate = Path(f"{drive}:\\") / relative
+            if candidate.exists():
+                return candidate
     return Path("adb.exe")
 
 

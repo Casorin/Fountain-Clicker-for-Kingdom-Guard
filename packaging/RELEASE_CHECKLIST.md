@@ -1,4 +1,4 @@
-# Публикация версии 1.1
+# Публикация версии 1.2
 
 Для игроков публикуется готовый архив, а не ZIP исходного кода GitHub.
 Не включать production runtime, историю, настройки, логи, токены и скриншоты.
@@ -6,18 +6,20 @@
 В разделе «Последнее обновление» описывать только существенные изменения поведения,
 исправления ошибок и новые возможности. Мелкие правки текста и оформления не перечислять.
 
-1. Выполнить тесты из текущего репозитория в Windows.
+1. Выполнить тесты из текущего репозитория в Windows. Проверить встроенный ADB
+   и его лицензионные уведомления; сборщик проверяет контрольные суммы автоматически.
 2. Собрать архив из проверенного окружения:
-   `.venv\Scripts\python.exe scripts\build_portable.py --output dist\release-1.1`
+   `.venv\Scripts\python.exe scripts\build_portable.py --output dist\release-1.2`
 3. Проверить перенос папки в путь с пробелами и кириллицей. Запустить
    `.python\python.exe -I scripts\launch_portable.py --self-test`.
-4. Проверить запуск BAT на отдельном Windows-компьютере без установленного Python,
+4. Проверить запуск «Запустить Фонтан.exe» на отдельном Windows-компьютере без установленного Python,
    в режиме «Без кликов». Эта проверка обязательна перед объявлением полной готовности.
+   Проверить снимки MEmu, LDPlayer и BlueStacks, в том числе при одновременном запуске.
 5. Проверить лицензионные уведомления библиотек и моделей, состав ZIP и SHA256.
-6. После согласования с владельцем опубликовать GitHub Release `v1.1`:
-   `Fountain-1.1-Windows.zip` и `Fountain-1.1-Windows.zip.sha256`.
+6. После согласования с владельцем опубликовать GitHub Release `v1.2`:
+   `Fountain-1.2-Windows.zip` и `Fountain-1.2-Windows.zip.sha256`.
 7. Прямая ссылка на ZIP:
-   https://github.com/Casorin/Fountain-Clicker-for-Kingdom-Guard/releases/download/v1.1/Fountain-1.1-Windows.zip
+   https://github.com/Casorin/Fountain-Clicker-for-Kingdom-Guard/releases/download/v1.2/Fountain-1.2-Windows.zip
 8. Если репозиторий private, обычные пользователи без доступа не смогут скачать
    архив. Публичный доступ менять только после отдельного согласования.
 

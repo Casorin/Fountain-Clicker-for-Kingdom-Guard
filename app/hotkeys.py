@@ -80,7 +80,9 @@ class CommandBus:
 
     def receive(self):
         commands = []
-        for path in sorted(self.folder.glob('*.json')):
+        paths = sorted(self.folder.glob('*.json'))
+        self.seen.intersection_update(path.name for path in paths)
+        for path in paths:
             if path.name in self.seen:
                 continue
             try:

@@ -6,6 +6,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
 from PIL import Image, ImageDraw, ImageTk
+from .persistence import UserRangeConfig
 
 
 PALETTES = {
@@ -206,6 +207,7 @@ class FountainDesign:
             app.start_method_var = tk.StringVar(value='range')
             app.start_percent_var = tk.StringVar(value='85')
         self.settings_note = tk.StringVar()
+        self.active_rule_summary = tk.StringVar()
         if not hasattr(app, 'click_speed_var'):
             app.click_speed_var = tk.StringVar(value='5')
         if not hasattr(app, 'percent_floor_enabled_var'):
@@ -228,7 +230,8 @@ class FountainDesign:
         ttk.Label(top, text="Фонтан", style="Title.TLabel").pack(side="left")
         ttk.Label(top, text="  /  Kingdom Guard", style="Muted.TLabel").pack(side="left", padx=8)
         ttk.Button(top, textvariable=self.theme_label, style="Icon.TButton", command=self.toggle_theme, width=3).pack(side="right")
-        ttk.Button(top, text="Выбрать окно\nэмулятора", style='Top.TButton', command=app.choose_window).pack(side="right", padx=(12, 10))
+        self.select_window_button = ttk.Button(top, text="Выбрать окно\nэмулятора", style='Top.TButton', command=app.choose_window)
+        self.select_window_button.pack(side="right", padx=(12, 10))
         if hasattr(app, 'open_program_window'):
             app.other_program_button = ttk.Button(top, text="Доп. окно\nпрограммы", style='Top.TButton',command=app.open_program_window)
             app.other_program_button.pack(side="right", padx=4)
@@ -359,8 +362,13 @@ class FountainDesign:
         self.click_speed_input = ttk.Spinbox(speed_box, textvariable=app.click_speed_var,
                                            from_=1, to=10, width=3, font=('Bahnschrift', 11))
         self.click_speed_input.pack(side='left')
-        self.settings_hint=ttk.Label(save_row,textvariable=self.settings_note,style='MutedCard.TLabel',wraplength=270)
-        self.settings_hint.pack(side='left', fill='x', expand=True)
+        rule_summary = ttk.Frame(save_row,style='Card.TFrame')
+        rule_summary.pack(side='left',fill='x',expand=True)
+        self.active_rule_label = ttk.Label(rule_summary,textvariable=self.active_rule_summary,
+                                         style='ActiveRule.TLabel',wraplength=310)
+        self.active_rule_label.pack(anchor='w')
+        self.settings_hint=ttk.Label(rule_summary,textvariable=self.settings_note,style='MutedCard.TLabel',wraplength=310)
+        self.settings_hint.pack(anchor='w')
         self.save_button=ttk.Button(save_row,text='Сохранить настройки',style='Save.TButton',command=app.apply_range)
         self.save_button.pack(side='right')
         ttk.Separator(card).pack(fill='x',pady=(2,4))
@@ -435,6 +443,14 @@ class FountainDesign:
         app.log_toggle_button = ttk.Button(self.details, text="☷  Журнал событий", style="Detail.Tool.TButton", command=app.toggle_logs)
         app.log_toggle_button.grid(row=0, column=2,rowspan=2, sticky="e")
         ttk.Label(self.details,textvariable=self.status,style='MutedCard.TLabel',wraplength=420).grid(row=1,column=0,sticky='w',padx=8,pady=(2,0))
+        data_row = ttk.Frame(self.details,style='Card.TFrame')
+        data_row.grid(row=2,column=0,columnspan=3,sticky='ew',pady=(7,0))
+        data_row.columnconfigure(0,weight=1)
+        ttk.Label(data_row,text='Автоочистка: снимки 7 дней / до 200 МБ · история до 5 000 записей',
+                  style='MutedCard.TLabel',wraplength=500).grid(row=0,column=0,sticky='w',padx=8)
+        self.reset_data_button = ttk.Button(data_row,text='Сбросить все данные',style='Detail.Tool.TButton',
+                                            command=getattr(app,'reset_all_data',lambda:None))
+        self.reset_data_button.grid(row=0,column=1,sticky='e')
         self.footer = ttk.Frame(frame)
         self.footer.grid(row=6, column=0, sticky='ew', pady=(5, 0))
         self.creator_name = ttk.Label(self.footer, text='casorin', style='Creator.TLabel')
@@ -596,14 +612,40 @@ class FountainDesign:
 
     def update_settings_hint(self):
         pending=self.settings_values()!=self.saved_settings
-        self.settings_note.set('Изменения ещё не применены.\nНажмите «Сохранить настройки».' if pending else
-            'После изменения нажмите\n«Сохранить настройки».')
+        self.settings_note.set('Новые настройки ещё не сохранены.' if pending else
+            'Изменения применятся после сохранения.')
         self.settings_hint.configure(style='Pending.TLabel' if pending else 'MutedCard.TLabel')
+        self.update_active_rule_summary()
+
+    def update_active_rule_summary(self):
+        monitor = getattr(self.app,'monitor',None)
+        getter = getattr(monitor,'target_range_label',None)
+        label = getter() if callable(getter) else None
+        if not isinstance(label,str):
+            low,high,unlimited,*_ = self.saved_settings
+            label = f'от {low:,}' if unlimited and isinstance(low,int) else (
+                f'{low:,}–{high:,}' if isinstance(low,int) and isinstance(high,int) else 'правило ещё не сохранено')
+            label = label.replace(',',' ')
+        _,_,_,_,gem_floor,method,_,prize_floor,speed = self.saved_settings
+        active = getattr(monitor,'user_range',None)
+        if isinstance(active,UserRangeConfig):
+            gem_floor = active.minimum_gems
+            method = active.start_method
+            prize_floor = active.percent_minimum_prize
+            speed = active.clicks_per_second
+        parts = [label]
+        if method == 'percent' and isinstance(prize_floor,int):
+            parts.append(f'≥ {prize_floor:,}'.replace(',',' '))
+        if isinstance(gem_floor,int):
+            parts.append(f'оставить {gem_floor:,}'.replace(',',' '))
+        parts.append(f'К/С {speed}')
+        self.active_rule_summary.set('Действует: ' + ' · '.join(parts))
 
     def mark_saved(self):
         self.saved_settings=self.settings_values()
-        self.settings_note.set('Настройки сохранены.\nВсё готово к наблюдению.')
+        self.settings_note.set('Настройки сохранены.')
         self.settings_hint.configure(style='MutedCard.TLabel')
+        self.update_active_rule_summary()
 
     def toggle_details(self):
         self.details_open = not self.details_open
@@ -654,6 +696,21 @@ class FountainDesign:
         from app.help_window import HelpWindow
         self.help_window = HelpWindow(self.root, PALETTES[self.theme])
 
+    def show_first_launch_help(self):
+        folder = getattr(self.app,'_data_root',self.app.config.runtime_dir)
+        marker = folder / 'onboarding.json'
+        if marker.exists():
+            return
+        self.open_help()
+        self.help_window.topics.selection_set(0)
+        self.help_window.show_topic()
+        self.help_window.lift()
+        try:
+            marker.parent.mkdir(parents=True,exist_ok=True)
+            marker.write_text(json.dumps({'first_launch_shown':True}),encoding='utf-8')
+        except OSError:
+            self.app._append_log('Не удалось сохранить отметку первого запуска. Инструкция может открыться снова.')
+
     def apply_theme(self):
         p = PALETTES[self.theme]
         s = ttk.Style(self.root)
@@ -664,10 +721,11 @@ class FountainDesign:
         if not hasattr(self, "theme_images"):
             self.theme_images = {}
         for role, color in (("Card", p["card"]), ("Hero", p["hero"]), ("Pink", p["pink"]),
-                            ("Button",p['card']),('Icon',p['bg']),('Input',p['entry']),('Soft',p['soft'])):
+                            ("Button",p['card']),('Icon',p['bg']),('Input',p['entry']),('Soft',p['soft']),
+                            ('SelectWindow', '#94e6b5' if self.theme == 'light' else '#35835e')):
             name = f"Fountain.{self.theme}.{role}"
             if name not in s.element_names():
-                outer = p['bg'] if role in {'Card','Hero','Icon'} else p['card']
+                outer = p['bg'] if role in {'Card','Hero','Icon','SelectWindow'} else p['card']
                 size=60 if role in {'Card','Hero','Pink'} else 32
                 image = Image.new("RGB", (size, size), outer)
                 ImageDraw.Draw(image).rounded_rectangle((0, 0, size-1, size-1), radius=14 if role in {'Card','Hero','Pink'} else 8,
@@ -679,7 +737,8 @@ class FountainDesign:
                 style = f"Rounded{role}.TFrame" if role!='Input' else 'Input.TFrame'
                 s.layout(style, [(name, {"sticky": "nsew"})])
             else:
-                style={'Pink':'Primary.TButton','Button':'TButton','Icon':'Icon.TButton'}[role]
+                style={'Pink':'Primary.TButton','Button':'TButton','Icon':'Icon.TButton',
+                       'SelectWindow':'SelectWindow.Top.TButton'}[role]
                 s.layout(style, [(name, {"sticky": "nsew", "children": [
                     ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
         s.configure(".", font=("Trebuchet MS", 10), background=p["bg"], foreground=p["text"])
@@ -709,6 +768,7 @@ class FountainDesign:
         s.layout('TSeparator',[('Separator.separator',{'sticky':'nswe'})])
         s.configure('TSeparator',background=p['line'],borderwidth=0)
         s.configure('Pending.TLabel',background=p['card'],foreground='#9a580b' if self.theme=='light' else '#ffd28d',font=('Bahnschrift',10,'bold'))
+        s.configure('ActiveRule.TLabel',background=p['card'],foreground=p['text'],font=('Bahnschrift',10,'bold'))
         s.configure("TButton", background=p["card"], foreground=p["text"], bordercolor=p["line"], lightcolor=p["line"], darkcolor=p["line"], padding=(12, 0))
         s.map("TButton", background=[("active", p["hero"])], foreground=[("active", p["text"])])
         s.configure("Small.TButton", padding=(8, 0))
@@ -716,6 +776,10 @@ class FountainDesign:
         s.configure('Icon.TButton',font=('Segoe UI Symbol',18),padding=(2,0))
         s.layout('Top.TButton',s.layout('Icon.TButton'))
         s.configure('Top.TButton',font=('Trebuchet MS',10),padding=(8,5),foreground=p['text'])
+        select_foreground = '#103a27' if self.theme == 'light' else '#ffffff'
+        s.configure('SelectWindow.Top.TButton', foreground=select_foreground)
+        s.map('SelectWindow.Top.TButton', foreground=[('active',select_foreground)])
+        self.update_window_selection_hint()
         s.configure('Window.TCombobox',fieldbackground=p['entry'],background=p['entry'],foreground=p['text'],
                     arrowcolor=p['muted'],borderwidth=0,bordercolor=p['entry'],lightcolor=p['entry'],darkcolor=p['entry'],padding=2)
         s.map('Window.TCombobox',fieldbackground=[('readonly',p['entry'])],foreground=[('readonly',p['text'])],
@@ -878,7 +942,13 @@ class FountainDesign:
         value = min(value, other-1) if self.dragging == 0 else max(value, other+1)
         variables[self.dragging].set(str(value))
 
+    def update_window_selection_hint(self):
+        selected = bool(getattr(self.app, '_selected_windows', []))
+        self.select_window_button.configure(style='Top.TButton' if selected else 'SelectWindow.Top.TButton')
+
     def pulse(self):
+        self.update_window_selection_hint()
+        self.update_active_rule_summary()
         self.update_percent_preview()
         app = self.app
         if hasattr(app, 'monitor') and hasattr(app.monitor, 'state'):
