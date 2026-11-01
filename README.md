@@ -13,9 +13,7 @@
 
 ## Скачать И Запустить На Windows
 
-**Для обычного пользователя нужен готовый архив `Fountain-1.3-Windows.zip`,
-а не кнопка «Code → Download ZIP».** В архив уже включены Python, библиотеки,
-модели распознавания и общее подключение ADB для MEmu, LDPlayer и BlueStacks.
+Скачайте **Fountain-1.3-Windows.zip** по ссылке ниже. Распакуйте архив и откройте **«Запустить Фонтан.exe»**. Ничего дополнительно устанавливать не нужно.
 
 ## [Скачать для Windows — версия 1.3](https://github.com/Casorin/Fountain-Clicker-for-Kingdom-Guard/releases/download/v1.3/Fountain-1.3-Windows.zip)
 
