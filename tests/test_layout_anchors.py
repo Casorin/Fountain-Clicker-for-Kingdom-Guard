@@ -24,6 +24,19 @@ class LayoutTests(unittest.TestCase):
             self.screen.paste(color, (r.left, r.top, r.right, r.bottom))
             self.assertTrue(analyze_anchors(self.screen, self.c, None).event_screen_ok)
 
+    def test_star_vase_requires_all_three_verified_labels(self):
+        for name,rect in [('prize',self.c.prize_label_crop),('daily',self.c.daily_label_crop),
+                          ('wish',self.c.wish_label_crop)]:
+            with Image.open(self.c.layout_template_dir / f'{name}_star_vase.png') as crop:
+                self.screen.paste(crop,(rect.left,rect.top))
+        status = analyze_anchors(self.screen,self.c,None)
+        self.assertTrue(status.event_screen_ok and status.button_visible)
+        self.assertEqual(status.title_variant,'star_vase')
+        for rect in (self.c.prize_label_crop,self.c.daily_label_crop,self.c.wish_label_crop):
+            other = self.screen.copy()
+            other.paste('black',(rect.left,rect.top,rect.right,rect.bottom))
+            self.assertNotEqual(analyze_anchors(other,self.c,None).title_variant,'star_vase')
+
     def test_missing_either_label(self):
         for rect in [self.c.prize_label_crop, self.c.daily_label_crop]:
             other = self.screen.copy()

@@ -70,7 +70,7 @@ def notification_dark_ratio(prize_crop: Image.Image) -> float:
     return float((brightness < 65.0).mean())
 
 
-def digit_visibility(prize_crop: Image.Image) -> tuple[bool, bool]:
+def digit_visibility(prize_crop: Image.Image, allow_dim_blue_background: bool = False) -> tuple[bool, bool]:
     """Check glyph-area contamination, not darkness of the whole notification bar.
 
     The supported game profile has warm yellow digits. White notification text
@@ -84,6 +84,11 @@ def digit_visibility(prize_crop: Image.Image) -> tuple[bool, bool]:
     red, green, blue = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
     white = (rgb.min(axis=2) > 150) & (rgb.max(axis=2) - rgb.min(axis=2) < 30)
     cool = ((blue > red + 15) | (green > red + 25)) & (rgb.max(axis=2) > 90)
+    has_cool_content = bool(cool.any())
+    if allow_dim_blue_background:
+        # Only a separately verified star-vase layout permits dim blue scenery.
+        # Bright reward icons and white overlays still veto the frame.
+        cool &= rgb.max(axis=2) > 160
     yellow = (red > 90) & (green > 70) & (red - blue > 25) & (green - blue > 20)
     # A small blue background fragment at the right edge is not a reward icon.
     # Accepted edge content still requires independent dual-engine OCR control.
@@ -92,7 +97,7 @@ def digit_visibility(prize_crop: Image.Image) -> tuple[bool, bool]:
     obscured = (white.mean() > 0.05
                 or (cool.mean() > 0.01 and not small_right_fragment)
                 or yellow.sum() < 40)
-    edge_content = bool(white.any() or cool.any())
+    edge_content = bool(white.any() or has_cool_content)
     return not obscured, edge_content
 
 
@@ -105,12 +110,13 @@ class NotificationVetoTracker:
         self.clear_streak = 0
         self.last_capture_id: str | None = None
 
-    def observe(self, prize_crop: Image.Image, capture_id: str) -> NotificationAssessment:
+    def observe(self, prize_crop: Image.Image, capture_id: str,
+                allow_dim_blue_background: bool = False) -> NotificationAssessment:
         if capture_id == self.last_capture_id:
             return NotificationAssessment(False, False, self.latched, "duplicate_capture", self.clear_streak, 0.0)
         self.last_capture_id = capture_id
         dark_ratio = notification_dark_ratio(prize_crop)
-        visible, edge_content = digit_visibility(prize_crop)
+        visible, edge_content = digit_visibility(prize_crop,allow_dim_blue_background)
         direct = dark_ratio >= self.visible_dark_ratio or edge_content or not visible
         heavy = dark_ratio >= 0.30
         if not visible:
@@ -238,9 +244,10 @@ class ProductionOcrPipeline:
         control_policy: Callable[[EngineReading], tuple[str, ...]] | None = None,
         recovery_allowed: bool = True,
         frame_local_control: bool = False,
+        allow_dim_blue_background: bool = False,
     ) -> ProductionOcrResult:
         started = time.perf_counter()
-        notification = self.notification_tracker.observe(crop, capture_id)
+        notification = self.notification_tracker.observe(crop, capture_id,allow_dim_blue_background)
         if notification.stage == "duplicate_capture":
             return ProductionOcrResult(
                 None, None, None, notification, (), False,
@@ -248,7 +255,7 @@ class ProductionOcrPipeline:
                 "duplicate capture ignored; recovery still requires a new frame",
             )
         if frame_local_control:
-            if not digit_visibility(crop)[0] or not recovery_allowed:
+            if not digit_visibility(crop,allow_dim_blue_background)[0] or not recovery_allowed:
                 return ProductionOcrResult(None,None,None,notification,(),False,
                     (time.perf_counter()-started)*1000.0,"video frame obscured or anchors unavailable")
             rapid = self.engines.rapid(crop)

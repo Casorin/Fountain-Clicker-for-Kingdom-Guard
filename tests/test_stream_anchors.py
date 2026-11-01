@@ -41,6 +41,29 @@ class StreamAnchorTests(unittest.TestCase):
         self.assertFalse(result.event_screen_ok)
         self.assertTrue(result.continuation_screen_ok)
 
+    def test_star_vase_video_marks_verified_background_profile(self):
+        for name,rect in [('prize',self.config.prize_label_crop),
+                          ('daily',self.config.daily_label_crop),('wish',self.config.wish_label_crop)]:
+            with Image.open(self.config.layout_template_dir/(name+'_star_vase.png')) as crop:
+                self.image.paste(crop,(rect.left,rect.top))
+        anchors=analyze_stream_anchors(self.image,self.config)
+        self.assertTrue(anchors.event_screen_ok and anchors.button_visible)
+        self.assertEqual(anchors.title_variant,'star_vase')
+        from app.production_ocr import ProductionOcrPipeline
+        from test_digit_visibility import Engines,FIXTURES
+        engines=Engines()
+        with Image.open(FIXTURES/'star_vase_video.png') as crop:
+            result=ProductionOcrPipeline(engines=engines).process(crop,'video-star',
+                frame_local_control=True,recovery_allowed=anchors.button_visible,
+                allow_dim_blue_background=(anchors.title_variant=='star_vase'
+                    and anchors.event_screen_ok and anchors.button_visible))
+        self.assertEqual(result.current.value,10200)
+        self.assertFalse(result.notification.veto)
+        self.assertEqual(engines.calls,['rapid','paddle'])
+        rect=self.config.daily_label_crop
+        self.image.paste('black',(rect.left-3,rect.top-3,rect.right+3,rect.bottom+3))
+        self.assertNotEqual(analyze_stream_anchors(self.image,self.config).title_variant,'star_vase')
+
     def test_wrong_size_never_authorizes_input(self):
         result=analyze_stream_anchors(self.image.resize((540,540)),self.config)
         self.assertFalse(result.event_screen_ok or result.button_visible or result.continuation_screen_ok)

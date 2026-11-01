@@ -70,6 +70,15 @@ def analyze_anchors_with_options(image: Image.Image, config: AppConfig,
     reward_score = _text_score(config.layout_template_dir / 'reward.png', reward, warm=True)
     button_score = max(_text_score(config.layout_template_dir / filename, wish, dark=True)
                        for filename in ('wish.png', 'wish_pressed.png', 'wish_infinitive.png', 'wish_infinitive_pressed.png'))
+    star_scores = (
+        _text_score(config.layout_template_dir / 'prize_star_vase.png', prize),
+        _text_score(config.layout_template_dir / 'daily_star_vase.png', daily),
+        _text_score(config.layout_template_dir / 'wish_star_vase.png', wish, dark=True),
+    )
+    star_layout = min(star_scores) >= config.layout_text_threshold
+    prize_score = max(prize_score,star_scores[0])
+    daily_score = max(daily_score,star_scores[1])
+    button_score = max(button_score,star_scores[2])
     pixels = np.asarray(button)
     gold = (pixels[:, :, 0] >= 170) & (pixels[:, :, 1] >= 110) & (pixels[:, :, 1] <= 210) & (pixels[:, :, 2] <= 120)
     gold_ratio = float(gold.mean())
@@ -82,7 +91,7 @@ def analyze_anchors_with_options(image: Image.Image, config: AppConfig,
         screen_ok, button_ok, daily_score, prize_score, button_score, gold_ratio,
         'Призовой фонд / Получено сегодня' if screen_ok else '',
         'ЗАГАДАЙТЕ ЖЕЛАНИЕ' if button_ok else '',
-        'season_independent' if supported_size else 'unsupported_resolution',
+        ('star_vase' if star_layout else 'season_independent') if supported_size else 'unsupported_resolution',
         'wish_text', crop_rect(image, config.event_title_crop), button,
         supported_size and max(daily_score, reward_score) >= config.layout_text_threshold and button_ok,
     )

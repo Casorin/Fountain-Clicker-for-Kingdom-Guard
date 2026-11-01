@@ -10,7 +10,10 @@ from app.vision import AnchorStatus
 
 def analyze_stream_anchors(image: Image.Image, config: AppConfig) -> AnchorStatus:
     def score(name: str, rect: Rect, animated: bool = False) -> float:
-        template = cv2.imread(str(config.layout_template_dir / (name+'.png')), 0)
+        path = config.layout_template_dir / (name+'.png')
+        if not path.is_file():
+            return 0.0
+        template = cv2.imread(str(path), 0)
         if template is None:
             return 0.0
         margin=8 if animated else 3
@@ -24,11 +27,18 @@ def analyze_stream_anchors(image: Image.Image, config: AppConfig) -> AnchorStatu
     daily = score('daily',config.daily_label_crop)
     reward = score('reward',config.reward_label_crop)
     button = max(score(name,config.wish_label_crop,animated=True) for name in ['wish','wish_pressed','wish_infinitive','wish_infinitive_pressed'])
+    star_scores = (score('prize_star_vase',config.prize_label_crop),
+                   score('daily_star_vase',config.daily_label_crop),
+                   score('wish_star_vase',config.wish_label_crop,animated=True))
+    star_layout = min(star_scores[:2]) >= .90 and star_scores[2] >= .95
+    prize = max(prize,star_scores[0])
+    daily = max(daily,star_scores[1])
+    button = max(button,star_scores[2])
     supported = image.size == (1080,1080)
     button_ok = supported and button >= .95
     screen_ok = supported and min(prize,daily) >= .90
     return AnchorStatus(screen_ok,button_ok,daily,prize,button,0.0,
                         'Призовой фонд / Получено сегодня' if screen_ok else '',
-                        'Желание' if button_ok else '', 'stream_layout','stream_wish',
+                        'Желание' if button_ok else '', 'star_vase' if star_layout else 'stream_layout','stream_wish',
                         crop_rect(image,config.event_title_crop),crop_rect(image,config.button_crop),
                         supported and max(daily,reward)>=.95 and button_ok)

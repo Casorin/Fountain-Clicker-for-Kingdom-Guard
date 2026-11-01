@@ -41,6 +41,24 @@ class VisibilityTests(unittest.TestCase):
         self.assertEqual(self.engines.calls, ["rapid", "paddle"])
         self.assertIn("digit_visibility_control", result.control_reasons)
 
+    def test_verified_star_vase_background_requires_dual_ocr(self):
+        with Image.open(FIXTURES/'star_vase.png') as image:
+            crop = image.convert('RGB')
+        self.assertFalse(digit_visibility(crop)[0])
+        self.assertEqual(digit_visibility(crop,True),(True,True))
+        result = self.pipeline.process(crop,'star',allow_dim_blue_background=True)
+        self.assertEqual(result.current.value,10200)
+        self.assertEqual(self.engines.calls,['rapid','paddle'])
+
+    def test_star_vase_permission_never_bypasses_overlays_or_disagreement(self):
+        for index in (8,10,17,22):
+            self.assertIsNone(self.pipeline.process(frame(index),f'star-{index}',
+                allow_dim_blue_background=True).current)
+        with Image.open(FIXTURES/'star_vase.png') as image:
+            self.engines.paddle_value = 999999
+            self.assertIsNone(ProductionOcrPipeline(engines=self.engines).process(
+                image.convert('RGB'),'disagreement',allow_dim_blue_background=True).current)
+
     def test_bluestacks_right_background_fragment_is_not_overlap(self):
         with Image.open(FIXTURES / 'blue_right_fragment.png') as crop:
             crop = crop.convert('RGB')

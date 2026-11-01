@@ -1208,6 +1208,8 @@ class PrizeMonitor:
             control_policy=self._paddle_control_reasons,
             recovery_allowed=anchors.button_visible,
             frame_local_control=self._stream is not None,
+            allow_dim_blue_background=(anchors.title_variant == 'star_vase'
+                                       and anchors.event_screen_ok and anchors.button_visible),
         )
         authoritative_ocr_ms = (time.perf_counter() - started_ocr) * 1000.0
         authoritative_ocr_ran = production_result.rapid is not None

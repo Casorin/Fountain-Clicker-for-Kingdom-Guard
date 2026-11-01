@@ -411,6 +411,21 @@ class DesignTests(unittest.TestCase):
             self.design.open_creator()
             opened.assert_called_once_with('https://t.me/casorin')
 
+    def test_github_link_is_next_to_coffee_and_opens_repository(self):
+        self.assertEqual(self.design.github_link.cget('text'),'github')
+        self.assertEqual(self.design.github_link.cget('style'),'Creator.TLabel')
+        self.root.geometry('840x890+10000+10000')
+        self.root.update()
+        self.assertTrue(self.design.github_link.winfo_viewable())
+        self.assertGreater(self.design.github_link.winfo_x(),self.design.coffee_link.winfo_x())
+        self.assertLessEqual(self.design.github_link.winfo_x()+self.design.github_link.winfo_width(),
+                             self.design.creator_name.winfo_x())
+        with patch('webbrowser.open') as opened:
+            for event in ('<Button-1>','<Return>','<space>'):
+                self.assertTrue(self.design.github_link.bind(event))
+            self.design.open_github()
+        opened.assert_called_once_with('https://github.com/Casorin/Fountain-Clicker-for-Kingdom-Guard')
+
     def test_coffee_link_has_requested_text_and_opens_boosty(self):
         self.assertEqual(self.design.coffee_link.cget('text'),'на кофе💜')
         self.assertEqual(self.design.coffee_link.cget('style'),'Creator.TLabel')

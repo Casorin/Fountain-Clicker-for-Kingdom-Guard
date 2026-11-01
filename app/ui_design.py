@@ -467,6 +467,12 @@ class FountainDesign:
         self.coffee_link.bind('<Button-1>', self.open_coffee)
         self.coffee_link.bind('<Return>', self.open_coffee)
         self.coffee_link.bind('<space>', self.open_coffee)
+        self.github_link = ttk.Label(self.footer, text='github', style='Creator.TLabel',
+                                     cursor='hand2', takefocus=True)
+        self.github_link.pack(side='left', padx=(14,0))
+        self.github_link.bind('<Button-1>', self.open_github)
+        self.github_link.bind('<Return>', self.open_github)
+        self.github_link.bind('<space>', self.open_github)
         self.apply_theme()
         app._update_group_table()
         self.update_upper_entry()
@@ -528,6 +534,10 @@ class FountainDesign:
     def open_coffee(self, _event=None):
         import webbrowser
         webbrowser.open('https://boosty.to/casorin/donate')
+
+    def open_github(self, _event=None):
+        import webbrowser
+        webbrowser.open('https://github.com/Casorin/Fountain-Clicker-for-Kingdom-Guard')
 
     def open_report(self):
         from app.bug_report import ReportWindow

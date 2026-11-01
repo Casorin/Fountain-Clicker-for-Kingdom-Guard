@@ -7,8 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleasePackagingTests(unittest.TestCase):
-    def test_version_is_12(self):
-        self.assertEqual(APP_VERSION, '1.2')
+    def test_version_is_13(self):
+        self.assertEqual(APP_VERSION, '1.3')
 
     def test_player_launcher_is_ascii_and_does_not_install_anything(self):
         source = (ROOT/'packaging'/'start.bat').read_bytes()
@@ -27,11 +27,11 @@ class ReleasePackagingTests(unittest.TestCase):
 
     def test_download_instructions_distinguish_player_archive_from_source(self):
         source = (ROOT/'README.md').read_text(encoding='utf-8')
-        self.assertIn('Fountain-1.2-Windows.zip', source)
+        self.assertIn('Fountain-1.3-Windows.zip', source)
         self.assertIn('Запустить Фонтан.exe', source)
         self.assertIn('Assets', source)
         self.assertIn('Извлечь всё', source)
-        self.assertIn('releases/download/v1.2/Fountain-1.2-Windows.zip', source)
+        self.assertIn('releases/download/v1.3/Fountain-1.3-Windows.zip', source)
 
     def test_launcher_waits_for_reset_before_creating_its_log(self):
         source = (ROOT/'scripts'/'launch_portable.py').read_text(encoding='utf-8')
