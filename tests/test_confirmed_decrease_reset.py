@@ -174,6 +174,14 @@ class ConfirmedDecreaseResetTests(unittest.TestCase):
         self.assertIn("15:00:00", event.reset_event_at or "")
         self.assertIn("15:00:00.200", event.reset_confirmed_at or "")
 
+    def test_history_uses_last_confirmed_fund_not_stale_cycle_maximum(self) -> None:
+        self.begin_cycle(105_200)
+        self.monitor.state.peak_since_reset = 346_000
+        self.frame(11_300,0,'low-1')
+        self.frame(11_350,200,'low-2')
+        self.assert_confirmed(105_200,11_350)
+        self.assertEqual(self.monitor.reset_history[0].drop_amount,93_850)
+
     def test_b_20000_to_10000_to_10050_confirms(self) -> None:
         self.begin_cycle(20_000)
         self.frame(10_000, 0, "low-1")

@@ -2,6 +2,7 @@ from pathlib import Path
 import unittest
 from PIL import Image
 from app.production_ocr import EngineReading, ProductionOcrPipeline, digit_visibility
+from app.production_ocr import _star_vase_digit_crop
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "notification_digits"
@@ -58,6 +59,33 @@ class VisibilityTests(unittest.TestCase):
             self.engines.paddle_value = 999999
             self.assertIsNone(ProductionOcrPipeline(engines=self.engines).process(
                 image.convert('RGB'),'disagreement',allow_dim_blue_background=True).current)
+
+    def test_star_vase_filters_scenery_for_both_engines_only_after_visibility_check(self):
+        from unittest.mock import Mock
+        self.engines.rapid = Mock(wraps=self.engines.rapid)
+        self.engines.paddle = Mock(wraps=self.engines.paddle)
+        with Image.open(FIXTURES/'star_vase_trailing_one.png') as image:
+            crop=image.convert('RGB')
+        result=self.pipeline.process(crop,'columns',frame_local_control=True,
+                                     allow_dim_blue_background=True)
+        self.assertIsNotNone(result.current)
+        prepared=self.engines.rapid.call_args.args[0]
+        self.assertNotEqual(prepared.tobytes(),crop.tobytes())
+        self.assertEqual(prepared.tobytes(),_star_vase_digit_crop(crop).tobytes())
+        self.assertEqual(prepared.tobytes(),self.engines.paddle.call_args.args[0].tobytes())
+        self.engines.rapid.reset_mock()
+        self.engines.paddle.reset_mock()
+        self.assertIsNone(self.pipeline.process(frame(8),'white-overlay',frame_local_control=True,
+                                                allow_dim_blue_background=True).current)
+        self.engines.rapid.assert_not_called()
+        self.engines.paddle.assert_not_called()
+
+    def test_old_layout_ocr_input_is_unchanged(self):
+        from unittest.mock import Mock
+        crop=frame(0)
+        self.engines.rapid=Mock(wraps=self.engines.rapid)
+        self.pipeline.process(crop,'old')
+        self.assertIs(self.engines.rapid.call_args.args[0],crop)
 
     def test_bluestacks_right_background_fragment_is_not_overlap(self):
         with Image.open(FIXTURES / 'blue_right_fragment.png') as crop:

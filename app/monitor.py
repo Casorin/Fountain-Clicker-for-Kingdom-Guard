@@ -1529,7 +1529,9 @@ class PrizeMonitor:
                 self._save_reset_diagnostics(now, "blocked_min_interval", recognition, anchors, prefilter)
             return
 
-        reference_peak = max(self.state.peak_since_reset or previous_high_value, previous_high_value)
+        # History describes the last confirmed fund before the fall, not an
+        # older cycle maximum that may include a subsequently corrected OCR spike.
+        reference_peak = previous_high_value
         controlled = self._reset_reading_has_paddle_control(recognition)
         if self.state.reset_candidate_hits == 0:
             if value >= previous_high_value:

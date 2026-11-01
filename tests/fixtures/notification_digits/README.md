@@ -11,6 +11,11 @@ in assets/templates/layout/*_star_vase.png.
 event. Its visible value is 27450. It exercises the video-anchor path together
 with the background permission, rather than only the still-image path.
 
+`star_vase_trailing_one.png` (53900) and `star_vase_trailing_zero.png` (50750)
+are read-only video crops from 2026-11-01 where background pillars caused extra
+OCR digits. Yellow-ink preprocessing is applied only for the verified star-vase
+profile, after overlap checks on the unmodified crop.
+
 These crops come from the bounded 20-wish recording on 2026-09-09.
 They cover clean digits, a dark moving notification, white overlapping text,
 and reward icons. They contain no inferred or cached OCR labels.

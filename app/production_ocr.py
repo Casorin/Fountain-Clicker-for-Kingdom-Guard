@@ -64,6 +64,16 @@ def _prepared_roi(crop: Image.Image) -> Image.Image:
     return roi.resize((roi.width * 4, roi.height * 4), Image.Resampling.LANCZOS)
 
 
+def _star_vase_digit_crop(crop: Image.Image) -> Image.Image:
+    # Animated blue columns resemble trailing 0/1 glyphs. Keep the verified
+    # layout's yellow ink; visibility vetoes still inspect the original image.
+    pixels = np.asarray(crop.convert('RGB')).copy()
+    red, green, blue = pixels.astype(np.int16).transpose(2,0,1)
+    ink = (red > 140) & (green > 110) & (red-blue > 40) & (green-blue > 35)
+    pixels[~ink] = (40,40,40)
+    return Image.fromarray(pixels)
+
+
 def notification_dark_ratio(prize_crop: Image.Image) -> float:
     rgb = np.asarray(prize_crop.convert("RGB"), dtype=np.float32)
     brightness = rgb.mean(axis=2)
@@ -254,12 +264,13 @@ class ProductionOcrPipeline:
                 (time.perf_counter() - started) * 1000.0,
                 "duplicate capture ignored; recovery still requires a new frame",
             )
+        ocr_crop = _star_vase_digit_crop(crop) if allow_dim_blue_background else crop
         if frame_local_control:
             if not digit_visibility(crop,allow_dim_blue_background)[0] or not recovery_allowed:
                 return ProductionOcrResult(None,None,None,notification,(),False,
                     (time.perf_counter()-started)*1000.0,"video frame obscured or anchors unavailable")
-            rapid = self.engines.rapid(crop)
-            paddle = self.engines.paddle(crop)
+            rapid = self.engines.rapid(ocr_crop)
+            paddle = self.engines.paddle(ocr_crop)
             agreed = (rapid.value is not None and rapid.value == paddle.value
                       and min(rapid.confidence,paddle.confidence) >= .90)
             if not agreed:
@@ -280,7 +291,7 @@ class ProductionOcrPipeline:
                 "notification veto: OCR decision path disabled",
             )
 
-        rapid = self.engines.rapid(crop)
+        rapid = self.engines.rapid(ocr_crop)
         if notification.stage == "clean_confirmation_1":
             self._pending_clean = rapid
             self._pending_capture_id = capture_id
@@ -309,7 +320,7 @@ class ProductionOcrPipeline:
                 and rapid.value is not None
                 and 0 <= rapid.value - pending.value <= self.compatible_growth
             )
-            paddle = self.engines.paddle(crop)
+            paddle = self.engines.paddle(ocr_crop)
             agreed = (
                 compatible and paddle.value is not None and paddle.value == rapid.value
                 and pending.confidence >= 0.90 and rapid.confidence >= 0.90
@@ -336,7 +347,7 @@ class ProductionOcrPipeline:
         reasons = control_policy(rapid) if control_policy is not None else ()
         if notification.stage == "readable_notification":
             reasons = (*reasons, "digit_visibility_control")
-        paddle = self.engines.paddle(crop) if reasons else None
+        paddle = self.engines.paddle(ocr_crop) if reasons else None
         visibility_confidence_ok = (
             notification.stage != "readable_notification"
             or (paddle is not None and rapid.confidence >= 0.90 and paddle.confidence >= 0.90)
